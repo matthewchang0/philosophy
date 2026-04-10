@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Duet Lab Conversation</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-page="conversation">
+    <div class="site-frame">
+      <header class="topbar topbar-detail">
+        <button id="menu-toggle" class="menu-button" type="button" aria-expanded="false" aria-controls="history-drawer">
+          <span class="menu-icon" aria-hidden="true"></span>
+          <span>Previous Messages</span>
+        </button>
+
+        <a href="/" class="brand-link" aria-label="Return to the Duet Lab home page">
+          <img src="/logo.svg" alt="" class="brand-link-logo" />
+          <span>Duet Lab</span>
+        </a>
+      </header>
+
+      <aside id="history-drawer" class="history-drawer" aria-hidden="true">
+        <div class="drawer-header">
+          <p class="eyebrow">History</p>
+          <div class="drawer-title-row">
+            <h2>Previous Messages</h2>
+            <button id="drawer-close" class="icon-button" type="button" aria-label="Close menu">×</button>
+          </div>
+          <p class="drawer-copy">Open another saved duet in its own page.</p>
+        </div>
+
+        <div class="sidebar-label-row">
+          <span class="sidebar-title">Saved Runs</span>
+          <span id="conversation-count" class="count-pill">0</span>
+        </div>
+        <nav id="conversation-list" class="conversation-list"></nav>
+      </aside>
+
+      <div id="drawer-scrim" class="drawer-scrim hidden"></div>
+
+      <main class="detail-stage">
+        <section class="conversation-shell">
+          <div id="detail-empty-state" class="empty-state hidden">
+            <p class="eyebrow">Conversation</p>
+            <h2>This duet could not be found.</h2>
+            <p>Choose another message from the menu or start a new one from the home page.</p>
+          </div>
+
+          <div id="conversation-view" class="conversation-view hidden">
+            <header class="conversation-header">
+              <div class="conversation-title-wrap">
+                <p class="eyebrow" id="conversation-status-line">Conversation</p>
+                <h1 id="conversation-title" class="detail-title"></h1>
+              </div>
+              <div class="header-actions">
+                <span id="status-pill" class="status-pill">idle</span>
+                <button id="resume-button" class="secondary-button hidden" type="button">Resume run</button>
+              </div>
+            </header>
+
+            <div id="config-chips" class="config-chips"></div>
+            <div id="error-banner" class="error-banner hidden"></div>
+
+            <section id="transcript-stage" class="transcript-stage"></section>
+
+            <section id="summary-stage" class="summary-stage hidden"></section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

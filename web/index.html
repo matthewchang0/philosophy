@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Duet Lab</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-page="home">
+    <div class="site-frame">
+      <header class="topbar">
+        <button id="menu-toggle" class="menu-button" type="button" aria-expanded="false" aria-controls="history-drawer">
+          <span class="menu-icon" aria-hidden="true"></span>
+          <span>Previous Messages</span>
+        </button>
+      </header>
+
+      <aside id="history-drawer" class="history-drawer" aria-hidden="true">
+        <div class="drawer-header">
+          <p class="eyebrow">History</p>
+          <div class="drawer-title-row">
+            <h2>Previous Messages</h2>
+            <button id="drawer-close" class="icon-button" type="button" aria-label="Close menu">×</button>
+          </div>
+          <p class="drawer-copy">Jump into any earlier duet from here.</p>
+        </div>
+
+        <div class="sidebar-label-row">
+          <span class="sidebar-title">Saved Runs</span>
+          <span id="conversation-count" class="count-pill">0</span>
+        </div>
+        <nav id="conversation-list" class="conversation-list"></nav>
+      </aside>
+
+      <div id="drawer-scrim" class="drawer-scrim hidden"></div>
+
+      <main class="landing-stage">
+        <section class="landing-hero">
+          <img src="/logo.svg" alt="Duet Lab logo" class="hero-logo" />
+          <p class="eyebrow">Playful Multi-Model Studio</p>
+          <h1 class="hero-title">Duet Lab</h1>
+          <p class="hero-copy">
+            Ask one question. Let OpenAI and Anthropic think out loud together. Watch the turns unfold, then let Claude
+            wrap it up with a verdict, agreements, disagreements, and a conclusion.
+          </p>
+        </section>
+
+        <section class="composer-card">
+          <div class="composer-header">
+            <div>
+              <p class="eyebrow">Start A New Duet</p>
+              <h2>What should they collaborate on?</h2>
+            </div>
+            <div class="sparkle-badge">Two models, one shared thread</div>
+          </div>
+
+          <form id="request-form" class="request-form">
+            <label class="field request-field">
+              <span>Your request</span>
+              <textarea
+                id="question-input"
+                name="question"
+                rows="5"
+                placeholder="Ask for philosophy, code, research, architecture, writing, planning, or anything else they can tackle together."
+                required
+              ></textarea>
+            </label>
+
+            <div class="form-grid">
+              <label class="field">
+                <span>OpenAI model</span>
+                <select id="openai-model" name="openai_model"></select>
+              </label>
+              <label class="field">
+                <span>Anthropic model</span>
+                <select id="anthropic-model" name="anthropic_model"></select>
+              </label>
+              <label class="field">
+                <span>Rounds</span>
+                <input id="rounds-input" name="rounds" type="number" min="1" max="12" value="6" />
+              </label>
+              <label class="field">
+                <span>Anthropic web search</span>
+                <select id="anthropic-web-search" name="anthropic_web_search">
+                  <option value="basic">basic</option>
+                  <option value="off">off</option>
+                  <option value="dynamic">dynamic</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="toggle-field" for="dry-run-input">
+              <div class="toggle-copy">
+                <span>Dry run</span>
+                <p>Test the orchestration flow without calling either API.</p>
+              </div>
+              <input id="dry-run-input" name="dry_run" type="checkbox" />
+            </label>
+
+            <div class="form-actions">
+              <button id="submit-button" class="primary-button" type="submit">Launch duet</button>
+              <p class="helper-copy">
+                The conversation is saved to disk while it runs, so interruptions can be resumed.
+              </p>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

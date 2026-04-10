@@ -1,0 +1,29 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="48" y1="32" x2="210" y2="224" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFBF5B"/>
+      <stop offset="0.5" stop-color="#FF835C"/>
+      <stop offset="1" stop-color="#76C8FF"/>
+    </linearGradient>
+    <linearGradient id="bubbleLeft" x1="62" y1="88" x2="150" y2="176" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF8ED"/>
+      <stop offset="1" stop-color="#FFE1CC"/>
+    </linearGradient>
+    <linearGradient id="bubbleRight" x1="104" y1="72" x2="196" y2="162" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FDFF"/>
+      <stop offset="1" stop-color="#DDF2FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="20" y="20" width="216" height="216" rx="58" fill="url(#bg)"/>
+  <rect x="20.5" y="20.5" width="215" height="215" rx="57.5" stroke="white" stroke-opacity="0.34"/>
+
+  <path d="M70 79C70 63.536 82.536 51 98 51H122C153.48 51 179 76.52 179 108C179 139.48 153.48 165 122 165H110L81 188V165C74.925 161.893 70 154.605 70 146.167V79Z" fill="url(#bubbleLeft)"/>
+  <path d="M186 177L160 156H149C122.49 156 101 134.51 101 108C101 81.49 122.49 60 149 60H160C175.464 60 188 72.536 188 88V150C188 160.624 187.278 169.391 186 177Z" fill="url(#bubbleRight)"/>
+
+  <circle cx="103" cy="108" r="7" fill="#F28A54"/>
+  <circle cx="128" cy="108" r="7" fill="#F1B14A"/>
+  <circle cx="153" cy="108" r="7" fill="#77C5F8"/>
+
+  <path d="M188 54L192.087 65.9132L204 70L192.087 74.0868L188 86L183.913 74.0868L172 70L183.913 65.9132L188 54Z" fill="#FFF8ED"/>
+</svg>

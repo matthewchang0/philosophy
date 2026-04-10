@@ -8,7 +8,8 @@ import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib import error, request
@@ -17,13 +18,15 @@ from urllib import error, request
 OPENAI_URL = "https://api.openai.com/v1/responses"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
-DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_ROUNDS = 6
 DEFAULT_MAX_OUTPUT_TOKENS = 1400
-DEFAULT_OPENAI_REASONING = "medium"
+DEFAULT_OPENAI_MAX_OUTPUT_TOKENS = 4000
+DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS = 1400
+DEFAULT_OPENAI_REASONING = "none"
 DEFAULT_ANTHROPIC_WEB_SEARCH = "basic"
 DEFAULT_OUTPUT_DIR = "runs"
-PROMPT_TRANSCRIPT_CHAR_BUDGET = 18000
+PROMPT_TRANSCRIPT_CHAR_BUDGET = 10000
 
 
 ACADEMIC_SOURCE_HINTS = [
@@ -66,11 +69,20 @@ class DebateTurn:
     raw_response: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ResumeState:
+    run_dir: Path
+    metadata: Dict[str, Any]
+    question: str
+    turns: List[DebateTurn]
+    summary_markdown: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run an extended philosophy debate between GPT-5.4 and Claude Opus 4.6."
+        description="Run an extended philosophy debate between OpenAI and Anthropic models."
     )
-    parser.add_argument("question", help="The question or prompt to debate.")
+    parser.add_argument("question", nargs="?", help="The question or prompt to debate.")
     parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS, help="How many GPT/Claude exchange rounds to run.")
     parser.add_argument(
         "--openai-model",
@@ -85,14 +97,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--openai-reasoning",
         default=DEFAULT_OPENAI_REASONING,
-        choices=["minimal", "low", "medium", "high", "xhigh"],
+        choices=["none", "minimal", "low", "medium", "high", "xhigh"],
         help=f"Reasoning effort for the OpenAI call. Default: {DEFAULT_OPENAI_REASONING}",
     )
     parser.add_argument(
         "--max-output-tokens",
         type=int,
-        default=DEFAULT_MAX_OUTPUT_TOKENS,
-        help=f"Maximum response tokens per model turn. Default: {DEFAULT_MAX_OUTPUT_TOKENS}",
+        default=None,
+        help=(
+            "Legacy shared token limit for both providers. "
+            "If omitted, OpenAI and Anthropic use separate defaults."
+        ),
+    )
+    parser.add_argument(
+        "--openai-max-output-tokens",
+        type=int,
+        default=None,
+        help=f"Maximum response tokens for OpenAI turns. Default: {DEFAULT_OPENAI_MAX_OUTPUT_TOKENS}",
+    )
+    parser.add_argument(
+        "--anthropic-max-output-tokens",
+        type=int,
+        default=None,
+        help=f"Maximum response tokens for Anthropic turns. Default: {DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS}",
     )
     parser.add_argument(
         "--anthropic-web-search",
@@ -115,6 +142,10 @@ def parse_args() -> argparse.Namespace:
         help=f"Directory for generated Markdown logs. Default: {DEFAULT_OUTPUT_DIR}",
     )
     parser.add_argument(
+        "--resume",
+        help="Resume an existing run from a run directory or a run.json file.",
+    )
+    parser.add_argument(
         "--fallback-without-web-search",
         action="store_true",
         help="If Anthropic web search is unavailable, retry without the search tool instead of stopping.",
@@ -124,7 +155,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Validate prompts, file generation, and CLI flow without calling either API.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.question and not args.resume:
+        parser.error("question is required unless --resume is provided")
+    return args
+
+
+def resolve_token_budgets(args: argparse.Namespace) -> None:
+    if args.max_output_tokens is not None:
+        args.openai_max_output_tokens = args.max_output_tokens
+        args.anthropic_max_output_tokens = args.max_output_tokens
+        return
+
+    if args.openai_max_output_tokens is None:
+        args.openai_max_output_tokens = DEFAULT_OPENAI_MAX_OUTPUT_TOKENS
+    if args.anthropic_max_output_tokens is None:
+        args.anthropic_max_output_tokens = DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS
 
 
 def load_dotenv(dotenv_path: Path) -> None:
@@ -176,6 +222,98 @@ def slugify(text: str) -> str:
 
 def now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def citation_from_dict(payload: Dict[str, Any]) -> Citation:
+    return Citation(
+        title=str(payload.get("title", "")),
+        url=str(payload.get("url", "")),
+        note=str(payload.get("note", "")),
+    )
+
+
+def turn_from_dict(payload: Dict[str, Any]) -> DebateTurn:
+    return DebateTurn(
+        speaker_label=str(payload.get("speaker_label", "")),
+        model=str(payload.get("model", "")),
+        provider=str(payload.get("provider", "")),
+        round_number=int(payload.get("round_number", 0)),
+        prompt=str(payload.get("prompt", "")),
+        response_text=str(payload.get("response_text", "")),
+        citations=[citation_from_dict(item) for item in payload.get("citations", [])],
+        usage=payload.get("usage", {}) or {},
+        raw_response=payload.get("raw_response", {}) or {},
+    )
+
+
+def resolve_resume_run_dir(raw_path: str) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
+    if candidate.is_file():
+        if candidate.name != "run.json":
+            raise SystemExit(f"Resume path must be a run directory or run.json file, got: {candidate}")
+        run_dir = candidate.parent
+    else:
+        run_dir = candidate
+    run_json_path = run_dir / "run.json"
+    if not run_json_path.exists():
+        raise SystemExit(f"Could not find run.json in {run_dir}")
+    return run_dir
+
+
+def load_resume_state(raw_path: str) -> ResumeState:
+    run_dir = resolve_resume_run_dir(raw_path)
+    run_json_path = run_dir / "run.json"
+    metadata = json.loads(run_json_path.read_text(encoding="utf-8"))
+    turns = [turn_from_dict(item) for item in metadata.get("turns", [])]
+
+    summary_markdown = ""
+    for turn in reversed(turns):
+        if "summary" in turn.speaker_label.lower():
+            summary_markdown = turn.response_text.strip()
+            break
+
+    if not summary_markdown:
+        summary_path = run_dir / "summary.md"
+        if summary_path.exists():
+            summary_markdown = summary_path.read_text(encoding="utf-8").strip()
+
+    question = str(metadata.get("question", "")).strip()
+    if not question:
+        raise SystemExit(f"Saved run metadata in {run_json_path} does not include a question.")
+
+    return ResumeState(
+        run_dir=run_dir,
+        metadata=metadata,
+        question=question,
+        turns=turns,
+        summary_markdown=summary_markdown,
+    )
+
+
+def apply_resume_config(args: argparse.Namespace, resume_state: ResumeState) -> None:
+    metadata = resume_state.metadata
+    saved_question = resume_state.question
+    if args.question and args.question != saved_question:
+        raise SystemExit(
+            "The provided question does not match the saved run. "
+            "Omit the question when using --resume, or resume a matching run."
+        )
+
+    args.question = saved_question
+    args.rounds = int(metadata.get("rounds", args.rounds))
+    args.openai_model = str(metadata.get("openai_model", args.openai_model))
+    args.openai_reasoning = str(metadata.get("openai_reasoning", args.openai_reasoning))
+    args.openai_max_output_tokens = int(
+        metadata.get("openai_max_output_tokens", args.openai_max_output_tokens)
+    )
+    args.anthropic_model = str(metadata.get("anthropic_model", args.anthropic_model))
+    args.anthropic_max_output_tokens = int(
+        metadata.get("anthropic_max_output_tokens", args.anthropic_max_output_tokens)
+    )
+    args.anthropic_web_search = str(metadata.get("anthropic_web_search", args.anthropic_web_search))
+    args.dry_run = bool(metadata.get("dry_run", getattr(args, "dry_run", False)))
 
 
 def dedupe_citations(citations: Iterable[Citation]) -> List[Citation]:
@@ -266,6 +404,60 @@ def extract_anthropic_text(raw_response: Dict[str, Any]) -> str:
     return "\n\n".join(pieces).strip()
 
 
+def parse_retry_after_header(value: str) -> Optional[float]:
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        pass
+    try:
+        reset_time = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if reset_time.tzinfo is None:
+        reset_time = reset_time.replace(tzinfo=timezone.utc)
+    return max((reset_time - datetime.now(timezone.utc)).total_seconds(), 0.0)
+
+
+def parse_iso_reset_header(value: str) -> Optional[float]:
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        reset_time = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if reset_time.tzinfo is None:
+        reset_time = reset_time.replace(tzinfo=timezone.utc)
+    return max((reset_time - datetime.now(timezone.utc)).total_seconds(), 0.0)
+
+
+def compute_retry_delay_seconds(http_error: error.HTTPError, provider: str, attempt: int) -> float:
+    headers = http_error.headers
+    retry_after = headers.get("retry-after")
+    if retry_after:
+        parsed = parse_retry_after_header(retry_after)
+        if parsed is not None:
+            return parsed
+
+    if provider == "anthropic":
+        for name in [
+            "anthropic-ratelimit-requests-reset",
+            "anthropic-ratelimit-input-tokens-reset",
+            "anthropic-ratelimit-output-tokens-reset",
+        ]:
+            value = headers.get(name)
+            if value:
+                parsed = parse_iso_reset_header(value)
+                if parsed is not None:
+                    return parsed
+
+    return float(attempt * 2)
+
+
 def request_json(
     url: str,
     headers: Dict[str, str],
@@ -295,7 +487,12 @@ def request_json(
             retryable = exc.code in {408, 409, 429, 500, 502, 503, 504}
             last_error = ApiError(provider=provider, status=exc.code, message=message, body=parsed_body)
             if retryable and attempt < attempts:
-                time.sleep(attempt * 2)
+                delay = compute_retry_delay_seconds(exc, provider, attempt)
+                print(
+                    f"{provider} returned HTTP {exc.code}. "
+                    f"Retrying in {delay:.1f} seconds (attempt {attempt + 1}/{attempts})."
+                )
+                time.sleep(delay)
                 continue
             raise last_error
         except error.URLError as exc:
@@ -356,18 +553,18 @@ def compose_debate_prompt(
 
     return "\n".join(
         [
-            f"You are {speaker_name} in a long-form philosophical debate with {counterpart_name}.",
+            f"You are {speaker_name} in a long-form collaborative dialogue with {counterpart_name}.",
             "",
-            "Debate topic:",
+            "User request:",
             question,
             "",
             "Your job in this turn:",
             f"1. Engage directly with the latest reasoning from {counterpart_name} and the broader transcript.",
-            "2. Use web research when it helps, with special attention to academic or high-authority sources.",
-            "3. Think carefully about philosophy, the meaning of life, and political organization where relevant.",
-            "4. Push the conversation forward rather than merely summarizing.",
-            "5. Explicitly note at least one point of agreement and one live disagreement if possible.",
-            "6. Ground claims in evidence when making factual assertions.",
+            "2. Adapt to the task: for coding, discuss implementation details and edge cases; for research, compare evidence; for planning, propose concrete next steps.",
+            "3. Use web research when it materially helps, especially for factual, technical, or time-sensitive claims.",
+            "4. Push the work forward rather than merely summarizing.",
+            "5. Be willing to agree, disagree, refine, or combine ideas where it improves the outcome.",
+            "6. Ground factual claims in evidence when possible.",
             "",
             "Research preferences:",
             "- Prefer reputable academic and reference sources when available.",
@@ -375,12 +572,14 @@ def compose_debate_prompt(
             "- You may also use other credible internet sources when helpful.",
             "",
             "Style:",
-            "- Write as if you are speaking to another brilliant philosopher, not to an end user.",
-            "- Be substantive, skeptical, and charitable.",
-            "- Keep the response to roughly 500-900 words.",
+            "- Write as if you are speaking to another capable collaborator, not directly to the end user.",
+            "- Be substantive, skeptical, and constructive.",
+            "- Use Markdown when it improves clarity.",
+            "- Include examples, pseudocode, code, or structured reasoning when useful.",
+            "- Keep the response to roughly 350-900 words.",
             "- End with 2 short bullets:",
-            "  Agreement: ...",
-            "  Disagreement: ...",
+            "  Alignment: ...",
+            "  Next tension or step: ...",
             "",
             f"This is round {round_number}.",
             "",
@@ -390,30 +589,36 @@ def compose_debate_prompt(
     ).strip()
 
 
-def compose_summary_prompt(question: str, turns: List[DebateTurn]) -> str:
+def compose_summary_prompt(
+    question: str,
+    turns: List[DebateTurn],
+    openai_label: str,
+    anthropic_label: str,
+) -> str:
     transcript_excerpt = render_transcript_excerpt(turns, char_budget=50000)
     return "\n".join(
         [
-            "You are Claude Opus 4.6. Summarize and synthesize the debate transcript below.",
+            f"You are {anthropic_label}. Summarize and synthesize the debate transcript below.",
             "",
             "Original question:",
             question,
             "",
             "Please return Markdown with these exact sections:",
-            "# Final Synthesis",
-            "## Direct Answer",
+            "# Claude's Final Wrap-Up",
+            "## Final Verdict",
             "## Agreements",
             "## Disagreements",
-            "## Strongest Points from GPT-5.4",
-            "## Strongest Points from Claude Opus 4.6",
-            "## Unresolved Questions",
-            "## Tentative Conclusion",
+            f"## Best Insight from {openai_label}",
+            f"## Best Insight from {anthropic_label}",
+            "## Conclusion",
             "## Sources Mentioned",
             "",
             "Requirements:",
             "- Focus on what the two models actually argued.",
+            "- In Final Verdict, give the clearest direct answer or recommended course of action.",
             "- Be specific about where they converged and where they parted ways.",
             "- If either model relied on stronger evidence, say so.",
+            "- In Conclusion, resolve the conversation as much as possible instead of leaving it open-ended.",
             "- Use concise bullets inside sections when helpful.",
             "- Keep the final synthesis readable and not overly long.",
             "",
@@ -430,15 +635,16 @@ def call_openai(
     reasoning: str,
     max_output_tokens: int,
 ) -> Dict[str, Any]:
-    payload = {
+    payload: Dict[str, Any] = {
         "model": model,
         "input": prompt,
-        "reasoning": {"effort": reasoning},
         "max_output_tokens": max_output_tokens,
         "tools": [{"type": "web_search"}],
         "tool_choice": "auto",
         "include": ["web_search_call.action.sources"],
     }
+    if reasoning != "none":
+        payload["reasoning"] = {"effort": reasoning}
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -512,13 +718,16 @@ def write_markdown_logs(
     summary_path = run_dir / "summary.md"
 
     transcript_lines = [
-        "# Philosophy Debate Transcript",
+        "# Duet Lab Transcript",
         "",
         f"- Started: `{run_dir.name}`",
         f"- Question: {question}",
         f"- Rounds configured: `{args.rounds}`",
         f"- OpenAI model: `{args.openai_model}`",
+        f"- OpenAI reasoning: `{args.openai_reasoning}`",
+        f"- OpenAI max output tokens: `{args.openai_max_output_tokens}`",
         f"- Anthropic model: `{args.anthropic_model}`",
+        f"- Anthropic max output tokens: `{args.anthropic_max_output_tokens}`",
         f"- Anthropic web search mode: `{args.anthropic_web_search}`",
         "",
         "## Turns",
@@ -559,7 +768,7 @@ def write_markdown_logs(
             transcript_lines.append("")
 
     if summary_markdown.strip():
-        transcript_lines.extend(["## Final Opus Summary", "", summary_markdown.strip(), ""])
+        transcript_lines.extend(["## Final Summary", "", summary_markdown.strip(), ""])
 
     transcript_path.write_text("\n".join(transcript_lines).strip() + "\n", encoding="utf-8")
     summary_path.write_text(summary_markdown.strip() + "\n", encoding="utf-8")
@@ -569,8 +778,12 @@ def write_run_metadata(run_dir: Path, question: str, turns: List[DebateTurn], ar
     payload = {
         "question": question,
         "rounds": args.rounds,
+        "dry_run": bool(getattr(args, "dry_run", False)),
         "openai_model": args.openai_model,
+        "openai_reasoning": args.openai_reasoning,
+        "openai_max_output_tokens": args.openai_max_output_tokens,
         "anthropic_model": args.anthropic_model,
+        "anthropic_max_output_tokens": args.anthropic_max_output_tokens,
         "anthropic_web_search": args.anthropic_web_search,
         "generated_at": datetime.now().isoformat(),
         "turns": [
@@ -603,7 +816,7 @@ def print_turn(turn: DebateTurn) -> None:
 def print_summary(summary_markdown: str) -> None:
     line = "=" * 88
     print(line)
-    print("Final Claude Opus Summary")
+    print("Final Anthropic Summary")
     print(line)
     print(summary_markdown.strip())
     print("")
@@ -638,165 +851,371 @@ def normalize_response_text(text: str) -> str:
     return "[No text returned by the provider. See run.json for the raw response.]"
 
 
+def determine_next_step(turns: List[DebateTurn], total_rounds: int) -> tuple[str, int]:
+    for turn in turns:
+        if "summary" in turn.speaker_label.lower():
+            return ("done", total_rounds + 1)
+
+    debate_turns = [turn for turn in turns if turn.round_number <= total_rounds]
+    if not debate_turns:
+        return ("openai", 1)
+
+    last_turn = debate_turns[-1]
+    if last_turn.provider == "openai":
+        return ("anthropic", last_turn.round_number)
+    if last_turn.provider == "anthropic":
+        next_round = last_turn.round_number + 1
+        if next_round <= total_rounds:
+            return ("openai", next_round)
+        return ("summary", total_rounds + 1)
+
+    raise SystemExit(f"Cannot determine how to resume after provider {last_turn.provider!r}")
+
+
+def openai_incomplete_reason(raw_response: Dict[str, Any]) -> str:
+    details = raw_response.get("incomplete_details") or {}
+    if isinstance(details, dict):
+        return str(details.get("reason") or "")
+    return ""
+
+
+def openai_used_only_reasoning_tokens(raw_response: Dict[str, Any]) -> bool:
+    usage = raw_response.get("usage") or {}
+    output_tokens = usage.get("output_tokens")
+    details = usage.get("output_tokens_details") or {}
+    reasoning_tokens = details.get("reasoning_tokens")
+    return bool(output_tokens and reasoning_tokens and output_tokens == reasoning_tokens)
+
+
+def should_retry_openai_for_visible_text(raw_response: Dict[str, Any], response_text: str) -> bool:
+    if response_text.strip():
+        return False
+    if raw_response.get("status") == "incomplete" and openai_incomplete_reason(raw_response) == "max_output_tokens":
+        return True
+    return openai_used_only_reasoning_tokens(raw_response)
+
+
+def retry_openai_with_more_headroom(
+    api_key: str,
+    model: str,
+    prompt: str,
+    reasoning: str,
+    max_output_tokens: int,
+) -> Optional[Dict[str, Any]]:
+    retry_reasoning = "none" if reasoning != "none" else reasoning
+    retry_tokens = max(4000, max_output_tokens * 3)
+
+    if retry_tokens == max_output_tokens and retry_reasoning == reasoning:
+        return None
+
+    print(
+        "OpenAI exhausted its token budget before emitting visible text. "
+        f"Retrying with reasoning={retry_reasoning} and max_output_tokens={retry_tokens}.\n"
+    )
+    retry_prompt = (
+        prompt
+        + "\n\nImportant: produce a visible answer for the user in this turn. "
+        + "Do not spend the full budget on internal reasoning."
+    )
+    return call_openai(
+        api_key=api_key,
+        model=model,
+        prompt=retry_prompt,
+        reasoning=retry_reasoning,
+        max_output_tokens=retry_tokens,
+    )
+
+
 def main() -> int:
     args = parse_args()
+    resolve_token_budgets(args)
     load_dotenv(Path(".env"))
 
-    run_dir = Path(args.output_dir) / f"{now_stamp()}-{slugify(args.question)}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-
+    resume_state: Optional[ResumeState] = None
     turns: List[DebateTurn] = []
     summary_markdown = ""
 
-    print(f"Writing logs to {run_dir}")
+    if args.resume:
+        resume_state = load_resume_state(args.resume)
+        apply_resume_config(args, resume_state)
+        run_dir = resume_state.run_dir
+        turns = list(resume_state.turns)
+        summary_markdown = resume_state.summary_markdown
+    else:
+        run_dir = Path(args.output_dir) / f"{now_stamp()}-{slugify(args.question)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+    output_run_dir = run_dir
+    if args.resume and args.dry_run:
+        output_run_dir = run_dir / ".dry-run-preview"
+        output_run_dir.mkdir(parents=True, exist_ok=True)
+
+    openai_label = f"OpenAI {args.openai_model}"
+    anthropic_label = f"Anthropic {args.anthropic_model}"
+    next_step, next_round = determine_next_step(turns, args.rounds)
+    completed_debate_turns = [turn for turn in turns if turn.round_number <= args.rounds]
+    if summary_markdown.strip() and len(completed_debate_turns) >= args.rounds * 2:
+        next_step = "done"
+        next_round = args.rounds + 1
+
+    if args.resume:
+        print(f"Resuming logs in {run_dir}")
+        if args.dry_run:
+            print(f"Dry-run preview logs will be written to {output_run_dir}")
+    else:
+        print(f"Writing logs to {run_dir}")
     print(f"Question: {args.question}\n")
 
+    if args.resume:
+        if next_step == "done":
+            print("This run is already complete.\n")
+            if summary_markdown.strip():
+                print_summary(summary_markdown)
+            print(f"Saved transcript to {run_dir / 'transcript.md'}")
+            print(f"Saved summary to {run_dir / 'summary.md'}")
+            return 0
+
+        if next_step == "summary":
+            print("Resuming at the final summary step.\n")
+        else:
+            print(f"Resuming at round {next_round} with the {next_step} turn.\n")
+
     if args.dry_run:
-        for round_number in range(1, args.rounds + 1):
-            openai_prompt = compose_debate_prompt(
-                speaker_name="OpenAI GPT-5.4",
-                counterpart_name="Claude Opus 4.6",
-                question=args.question,
-                round_number=round_number,
-                prior_turns=turns,
-            )
-            turns.append(
-                build_stub_turn(
-                    speaker_label="GPT-5.4",
-                    model=args.openai_model,
-                    provider="openai",
-                    round_number=round_number,
-                    prompt=openai_prompt,
-                )
-            )
+        while True:
+            step, round_number = determine_next_step(turns, args.rounds)
+            if step == "done":
+                write_markdown_logs(output_run_dir, args.question, turns, summary_markdown, args)
+                write_run_metadata(output_run_dir, args.question, turns, args)
+                if summary_markdown.strip():
+                    print_summary(summary_markdown)
+                return 0
 
-            anthropic_prompt = compose_debate_prompt(
-                speaker_name="Claude Opus 4.6",
-                counterpart_name="OpenAI GPT-5.4",
-                question=args.question,
-                round_number=round_number,
-                prior_turns=turns,
-            )
-            turns.append(
-                build_stub_turn(
-                    speaker_label="Claude Opus 4.6",
-                    model=args.anthropic_model,
-                    provider="anthropic",
+            if step == "openai":
+                openai_prompt = compose_debate_prompt(
+                    speaker_name=openai_label,
+                    counterpart_name=anthropic_label,
+                    question=args.question,
                     round_number=round_number,
-                    prompt=anthropic_prompt,
+                    prior_turns=turns,
                 )
-            )
+                turns.append(
+                    build_stub_turn(
+                        speaker_label=openai_label,
+                        model=args.openai_model,
+                        provider="openai",
+                        round_number=round_number,
+                        prompt=openai_prompt,
+                    )
+                )
+                write_markdown_logs(output_run_dir, args.question, turns, summary_markdown, args)
+                write_run_metadata(output_run_dir, args.question, turns, args)
+                continue
 
-        summary_markdown = "# Final Synthesis\n\n[dry-run] Claude Opus 4.6 would synthesize the debate here."
-        write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-        write_run_metadata(run_dir, args.question, turns, args)
-        print_summary(summary_markdown)
-        return 0
+            if step == "anthropic":
+                anthropic_prompt = compose_debate_prompt(
+                    speaker_name=anthropic_label,
+                    counterpart_name=openai_label,
+                    question=args.question,
+                    round_number=round_number,
+                    prior_turns=turns,
+                )
+                turns.append(
+                    build_stub_turn(
+                        speaker_label=anthropic_label,
+                        model=args.anthropic_model,
+                        provider="anthropic",
+                        round_number=round_number,
+                        prompt=anthropic_prompt,
+                    )
+                )
+                write_markdown_logs(output_run_dir, args.question, turns, summary_markdown, args)
+                write_run_metadata(output_run_dir, args.question, turns, args)
+                continue
+
+            if step == "summary":
+                summary_markdown = "\n".join(
+                    [
+                        "# Claude's Final Wrap-Up",
+                        "",
+                        "## Final Verdict",
+                        "",
+                        f"[dry-run] {anthropic_label} would give the direct answer here.",
+                        "",
+                        "## Agreements",
+                        "",
+                        f"- [dry-run] Shared ground from {openai_label} and {anthropic_label}.",
+                        "",
+                        "## Disagreements",
+                        "",
+                        f"- [dry-run] Remaining differences between {openai_label} and {anthropic_label}.",
+                        "",
+                        f"## Best Insight from {openai_label}",
+                        "",
+                        f"[dry-run] Strongest contribution from {openai_label}.",
+                        "",
+                        f"## Best Insight from {anthropic_label}",
+                        "",
+                        f"[dry-run] Strongest contribution from {anthropic_label}.",
+                        "",
+                        "## Conclusion",
+                        "",
+                        f"[dry-run] {anthropic_label} would close with a concise conclusion here.",
+                        "",
+                        "## Sources Mentioned",
+                        "",
+                        "- [dry-run] No live sources fetched.",
+                    ]
+                )
+                write_markdown_logs(output_run_dir, args.question, turns, summary_markdown, args)
+                write_run_metadata(output_run_dir, args.question, turns, args)
+                print_summary(summary_markdown)
+                return 0
+
+            raise SystemExit(f"Unknown step type {step!r}")
 
     api_keys = require_api_keys()
 
     try:
-        for round_number in range(1, args.rounds + 1):
-            openai_prompt = compose_debate_prompt(
-                speaker_name="OpenAI GPT-5.4",
-                counterpart_name="Claude Opus 4.6",
-                question=args.question,
-                round_number=round_number,
-                prior_turns=turns,
-            )
-            openai_raw = call_openai(
-                api_key=api_keys["openai"],
-                model=args.openai_model,
-                prompt=openai_prompt,
-                reasoning=args.openai_reasoning,
-                max_output_tokens=args.max_output_tokens,
-            )
-            openai_turn = DebateTurn(
-                speaker_label="GPT-5.4",
-                model=openai_raw.get("model", args.openai_model),
-                provider="openai",
-                round_number=round_number,
-                prompt=openai_prompt,
-                response_text=normalize_response_text(extract_openai_text(openai_raw)),
-                citations=extract_openai_citations(openai_raw),
-                usage=openai_raw.get("usage", {}),
-                raw_response=openai_raw,
-            )
-            turns.append(openai_turn)
-            write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-            write_run_metadata(run_dir, args.question, turns, args)
-            print_turn(openai_turn)
+        while True:
+            step, round_number = determine_next_step(turns, args.rounds)
 
-            anthropic_prompt = compose_debate_prompt(
-                speaker_name="Claude Opus 4.6",
-                counterpart_name="OpenAI GPT-5.4",
-                question=args.question,
-                round_number=round_number,
-                prior_turns=turns,
-            )
-            anthropic_raw = call_anthropic(
-                api_key=api_keys["anthropic"],
-                model=args.anthropic_model,
-                prompt=anthropic_prompt,
-                max_output_tokens=args.max_output_tokens,
-                web_search_mode=args.anthropic_web_search,
-                max_searches=args.anthropic_max_searches,
-                fallback_without_web_search=args.fallback_without_web_search,
-            )
-            anthropic_turn = DebateTurn(
-                speaker_label="Claude Opus 4.6",
-                model=anthropic_raw.get("model", args.anthropic_model),
-                provider="anthropic",
-                round_number=round_number,
-                prompt=anthropic_prompt,
-                response_text=normalize_response_text(extract_anthropic_text(anthropic_raw)),
-                citations=extract_anthropic_citations(anthropic_raw),
-                usage=anthropic_raw.get("usage", {}),
-                raw_response=anthropic_raw,
-            )
-            turns.append(anthropic_turn)
-            write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-            write_run_metadata(run_dir, args.question, turns, args)
-            print_turn(anthropic_turn)
+            if step == "done":
+                if summary_markdown.strip():
+                    print_summary(summary_markdown)
+                print(f"Saved transcript to {run_dir / 'transcript.md'}")
+                print(f"Saved summary to {run_dir / 'summary.md'}")
+                return 0
 
-        summary_prompt = compose_summary_prompt(args.question, turns)
-        summary_raw = call_anthropic(
-            api_key=api_keys["anthropic"],
-            model=args.anthropic_model,
-            prompt=summary_prompt,
-            max_output_tokens=max(args.max_output_tokens, 1600),
-            web_search_mode=args.anthropic_web_search,
-            max_searches=max(3, min(args.anthropic_max_searches, 5)),
-            fallback_without_web_search=args.fallback_without_web_search,
-        )
-        summary_markdown = normalize_response_text(extract_anthropic_text(summary_raw))
+            if step == "openai":
+                openai_prompt = compose_debate_prompt(
+                    speaker_name=openai_label,
+                    counterpart_name=anthropic_label,
+                    question=args.question,
+                    round_number=round_number,
+                    prior_turns=turns,
+                )
+                openai_raw = call_openai(
+                    api_key=api_keys["openai"],
+                    model=args.openai_model,
+                    prompt=openai_prompt,
+                    reasoning=args.openai_reasoning,
+                    max_output_tokens=args.openai_max_output_tokens,
+                )
+                openai_response_text = extract_openai_text(openai_raw)
+                openai_prompt_for_log = openai_prompt
+                if should_retry_openai_for_visible_text(openai_raw, openai_response_text):
+                    retry_raw = retry_openai_with_more_headroom(
+                        api_key=api_keys["openai"],
+                        model=args.openai_model,
+                        prompt=openai_prompt,
+                        reasoning=args.openai_reasoning,
+                        max_output_tokens=args.openai_max_output_tokens,
+                    )
+                    if retry_raw is not None:
+                        openai_raw = retry_raw
+                        openai_response_text = extract_openai_text(openai_raw)
+                        openai_prompt_for_log = (
+                            openai_prompt
+                            + "\n\n[auto-retry] The first OpenAI attempt exhausted max_output_tokens "
+                            + "before producing visible text, so the orchestrator retried with a larger budget."
+                        )
+                openai_turn = DebateTurn(
+                    speaker_label=openai_label,
+                    model=openai_raw.get("model", args.openai_model),
+                    provider="openai",
+                    round_number=round_number,
+                    prompt=openai_prompt_for_log,
+                    response_text=normalize_response_text(openai_response_text),
+                    citations=extract_openai_citations(openai_raw),
+                    usage=openai_raw.get("usage", {}),
+                    raw_response=openai_raw,
+                )
+                turns.append(openai_turn)
+                write_markdown_logs(output_run_dir, args.question, turns, summary_markdown, args)
+                write_run_metadata(output_run_dir, args.question, turns, args)
+                print_turn(openai_turn)
+                continue
 
-        summary_turn = DebateTurn(
-            speaker_label="Claude Opus 4.6 Summary",
-            model=summary_raw.get("model", args.anthropic_model),
-            provider="anthropic",
-            round_number=args.rounds + 1,
-            prompt=summary_prompt,
-            response_text=summary_markdown,
-            citations=extract_anthropic_citations(summary_raw),
-            usage=summary_raw.get("usage", {}),
-            raw_response=summary_raw,
-        )
-        turns.append(summary_turn)
-        write_markdown_logs(run_dir, args.question, turns[:-1], summary_markdown, args)
-        write_run_metadata(run_dir, args.question, turns, args)
-        print_summary(summary_markdown)
-        print(f"Saved transcript to {run_dir / 'transcript.md'}")
-        print(f"Saved summary to {run_dir / 'summary.md'}")
-        return 0
+            if step == "anthropic":
+                anthropic_prompt = compose_debate_prompt(
+                    speaker_name=anthropic_label,
+                    counterpart_name=openai_label,
+                    question=args.question,
+                    round_number=round_number,
+                    prior_turns=turns,
+                )
+                anthropic_raw = call_anthropic(
+                    api_key=api_keys["anthropic"],
+                    model=args.anthropic_model,
+                    prompt=anthropic_prompt,
+                    max_output_tokens=args.anthropic_max_output_tokens,
+                    web_search_mode=args.anthropic_web_search,
+                    max_searches=args.anthropic_max_searches,
+                    fallback_without_web_search=args.fallback_without_web_search,
+                )
+                anthropic_turn = DebateTurn(
+                    speaker_label=anthropic_label,
+                    model=anthropic_raw.get("model", args.anthropic_model),
+                    provider="anthropic",
+                    round_number=round_number,
+                    prompt=anthropic_prompt,
+                    response_text=normalize_response_text(extract_anthropic_text(anthropic_raw)),
+                    citations=extract_anthropic_citations(anthropic_raw),
+                    usage=anthropic_raw.get("usage", {}),
+                    raw_response=anthropic_raw,
+                )
+                turns.append(anthropic_turn)
+                write_markdown_logs(output_run_dir, args.question, turns, summary_markdown, args)
+                write_run_metadata(output_run_dir, args.question, turns, args)
+                print_turn(anthropic_turn)
+                continue
+
+            if step == "summary":
+                summary_prompt = compose_summary_prompt(
+                    args.question,
+                    turns,
+                    openai_label=openai_label,
+                    anthropic_label=anthropic_label,
+                )
+                summary_raw = call_anthropic(
+                    api_key=api_keys["anthropic"],
+                    model=args.anthropic_model,
+                    prompt=summary_prompt,
+                    max_output_tokens=max(args.anthropic_max_output_tokens, 1600),
+                    web_search_mode=args.anthropic_web_search,
+                    max_searches=max(3, min(args.anthropic_max_searches, 5)),
+                    fallback_without_web_search=args.fallback_without_web_search,
+                )
+                summary_markdown = normalize_response_text(extract_anthropic_text(summary_raw))
+
+                summary_turn = DebateTurn(
+                    speaker_label=f"{anthropic_label} Summary",
+                    model=summary_raw.get("model", args.anthropic_model),
+                    provider="anthropic",
+                    round_number=args.rounds + 1,
+                    prompt=summary_prompt,
+                    response_text=summary_markdown,
+                    citations=extract_anthropic_citations(summary_raw),
+                    usage=summary_raw.get("usage", {}),
+                    raw_response=summary_raw,
+                )
+                turns.append(summary_turn)
+                write_markdown_logs(output_run_dir, args.question, turns[:-1], summary_markdown, args)
+                write_run_metadata(output_run_dir, args.question, turns, args)
+                print_summary(summary_markdown)
+                print(f"Saved transcript to {output_run_dir / 'transcript.md'}")
+                print(f"Saved summary to {output_run_dir / 'summary.md'}")
+                return 0
+
+            raise SystemExit(f"Unknown step type {step!r}")
     except ApiError as exc:
-        write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-        write_run_metadata(run_dir, args.question, turns, args)
+        write_markdown_logs(output_run_dir, args.question, turns, summary_markdown, args)
+        write_run_metadata(output_run_dir, args.question, turns, args)
         print(f"{exc.provider} API error", file=sys.stderr)
         if exc.status is not None:
             print(f"Status: {exc.status}", file=sys.stderr)
         print(str(exc), file=sys.stderr)
-        print(f"Partial logs were saved to {run_dir}", file=sys.stderr)
+        print(f"Partial logs were saved to {output_run_dir}", file=sys.stderr)
         return 1
 
 
