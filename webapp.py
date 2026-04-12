@@ -24,6 +24,7 @@ from urllib.error import HTTPError
 from uuid import uuid4
 
 import orchestrator as orch
+import pantheon_storage as storage
 
 try:
     import certifi
@@ -105,7 +106,13 @@ def should_run_inline() -> bool:
     return IS_VERCEL
 
 
+def durable_storage_enabled() -> bool:
+    return storage.storage_enabled()
+
+
 def auth_db() -> sqlite3.Connection:
+    if durable_storage_enabled():
+        raise RuntimeError("SQLite auth_db should not be used when DATABASE_URL is configured.")
     AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(AUTH_DB_PATH)
     connection.row_factory = sqlite3.Row
@@ -113,6 +120,9 @@ def auth_db() -> sqlite3.Connection:
 
 
 def init_auth_db() -> None:
+    if durable_storage_enabled():
+        storage.init_storage()
+        return
     connection = auth_db()
     try:
         connection.execute(
@@ -186,6 +196,17 @@ def create_user(email: str, password: str, name: str = "", avatar_url: str = "",
     }
     user["password_hash"] = hash_password(password, user["password_salt"])
 
+    if durable_storage_enabled():
+        persisted = storage.insert_user(user)
+        storage.record_auth_event(
+            user_id=persisted["id"],
+            email=persisted["email"],
+            event_type="signup",
+            created_at=persisted["created_at"],
+            details={"auth_provider": persisted["auth_provider"], "created_source": storage.runtime_source()},
+        )
+        return persisted
+
     connection = auth_db()
     try:
         try:
@@ -220,6 +241,43 @@ def upsert_google_user(email: str, name: str, avatar_url: str = "") -> Dict[str,
         raise ValueError("Enter a valid email address.")
     if not normalized_name:
         raise ValueError("Google did not return a valid name.")
+
+    if durable_storage_enabled():
+        row = storage.fetch_user_by_email(normalized_email)
+        if row is None:
+            user = {
+                "id": uuid4().hex,
+                "email": normalized_email,
+                "name": normalized_name,
+                "avatar_url": str(avatar_url or "").strip(),
+                "auth_provider": "google",
+                "password_salt": secrets.token_hex(16),
+                "created_at": iso_now(),
+            }
+            user["password_hash"] = hash_password(secrets.token_urlsafe(32), user["password_salt"])
+            persisted = storage.insert_user(user)
+            storage.record_auth_event(
+                user_id=persisted["id"],
+                email=persisted["email"],
+                event_type="google_signup",
+                created_at=persisted["created_at"],
+                details={"auth_provider": "google"},
+            )
+            return persisted
+        patch = {
+            "name": normalized_name or row.get("name", ""),
+            "avatar_url": str(avatar_url or "").strip() or row.get("avatar_url", ""),
+        }
+        storage.update_user(row["id"], patch)
+        refreshed = storage.fetch_user_by_id(row["id"])
+        storage.record_auth_event(
+            user_id=row["id"],
+            email=row["email"],
+            event_type="google_login",
+            created_at=iso_now(),
+            details={"auth_provider": "google"},
+        )
+        return refreshed or {**row, **patch}
 
     connection = auth_db()
     try:
@@ -285,6 +343,26 @@ def upsert_google_user(email: str, name: str, avatar_url: str = "") -> Dict[str,
 
 def authenticate_user(email: str, password: str) -> Dict[str, Any]:
     normalized_email = normalize_email(email)
+    if durable_storage_enabled():
+        row = storage.fetch_user_by_email(normalized_email)
+        if row is None:
+            raise ValueError("Invalid email or password.")
+        candidate = hash_password(password, row["password_salt"])
+        if not hmac.compare_digest(candidate, row["password_hash"]):
+            raise ValueError("Invalid email or password.")
+        storage.update_user(
+            row["id"],
+            {"last_login_at": iso_now(), "last_login_source": storage.runtime_source()},
+        )
+        storage.record_auth_event(
+            user_id=row["id"],
+            email=row["email"],
+            event_type="login",
+            created_at=iso_now(),
+            details={"auth_provider": row.get("auth_provider", "local")},
+        )
+        refreshed = storage.fetch_user_by_id(row["id"])
+        return refreshed or row
     connection = auth_db()
     try:
         row = connection.execute(
@@ -303,6 +381,8 @@ def authenticate_user(email: str, password: str) -> Dict[str, Any]:
 
 def user_by_email(email: str) -> Optional[Dict[str, Any]]:
     normalized_email = normalize_email(email)
+    if durable_storage_enabled():
+        return storage.fetch_user_by_email(normalized_email)
     connection = auth_db()
     try:
         row = connection.execute(
@@ -317,6 +397,24 @@ def user_by_email(email: str) -> Optional[Dict[str, Any]]:
 def change_user_password(user_id: str, current_password: str, new_password: str) -> None:
     if len(new_password) < 8:
         raise ValueError("New passwords must be at least 8 characters.")
+    if durable_storage_enabled():
+        row = storage.fetch_user_by_id(user_id)
+        if row is None:
+            raise ValueError("User not found.")
+        current_hash = hash_password(current_password, row["password_salt"])
+        if not hmac.compare_digest(current_hash, row["password_hash"]):
+            raise ValueError("Current password is incorrect.")
+        new_salt = secrets.token_hex(16)
+        new_hash = hash_password(new_password, new_salt)
+        storage.update_user(user_id, {"password_salt": new_salt, "password_hash": new_hash})
+        storage.record_auth_event(
+            user_id=user_id,
+            email=row.get("email", ""),
+            event_type="password_change",
+            created_at=iso_now(),
+            details={},
+        )
+        return
     connection = auth_db()
     try:
         row = connection.execute(
@@ -343,6 +441,9 @@ def create_session(user_id: str) -> str:
     token = secrets.token_urlsafe(32)
     created_at = iso_now()
     expires_at = datetime.fromtimestamp(datetime.now().timestamp() + SESSION_MAX_AGE).isoformat()
+    if durable_storage_enabled():
+        storage.insert_session(token, user_id, created_at, expires_at)
+        return token
     connection = auth_db()
     try:
         connection.execute(
@@ -358,6 +459,9 @@ def create_session(user_id: str) -> str:
 def delete_session(token: str) -> None:
     if not token:
         return
+    if durable_storage_enabled():
+        storage.delete_session(token)
+        return
     connection = auth_db()
     try:
         connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
@@ -369,6 +473,26 @@ def delete_session(token: str) -> None:
 def user_for_session_token(token: str) -> Optional[Dict[str, Any]]:
     if not token:
         return None
+    if durable_storage_enabled():
+        row = storage.fetch_session_user(token)
+        if row is None:
+            return None
+        expires_at = str(row["expires_at"])
+        if expires_at and datetime.fromisoformat(expires_at) <= datetime.now():
+            storage.delete_session(token)
+            return None
+        return {
+            "id": row["id"],
+            "email": row["email"],
+            "name": row.get("name", ""),
+            "avatar_url": row.get("avatar_url", ""),
+            "auth_provider": row.get("auth_provider", "local"),
+            "created_at": row["created_at"],
+            "created_source": row.get("created_source", ""),
+            "created_host": row.get("created_host", ""),
+            "last_login_at": row.get("last_login_at", ""),
+            "last_login_source": row.get("last_login_source", ""),
+        }
     connection = auth_db()
     try:
         row = connection.execute(
@@ -409,6 +533,10 @@ def user_payload(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         "avatarUrl": user.get("avatar_url", ""),
         "authProvider": user.get("auth_provider", "local"),
         "createdAt": user.get("created_at", ""),
+        "createdSource": user.get("created_source", ""),
+        "createdHost": user.get("created_host", ""),
+        "lastLoginAt": user.get("last_login_at", ""),
+        "lastLoginSource": user.get("last_login_source", ""),
     }
 
 
@@ -504,7 +632,129 @@ def build_conversation_payload(run_dir: Path, include_turns: bool = True) -> Dic
     return payload
 
 
+def build_conversation_payload_from_record(record: Dict[str, Any], include_turns: bool = True) -> Dict[str, Any]:
+    participants = record.get("participants", []) or []
+    turns = record.get("turns", []) or []
+    summarizer_id = str(record.get("summarizer_id", ""))
+    summarizer_label = ""
+    for participant in participants:
+        if participant.get("participant_id") == summarizer_id:
+            summarizer_label = str(participant.get("label", ""))
+            break
+    payload = {
+        "id": record["id"],
+        "title": record.get("title", ""),
+        "question": record.get("question", ""),
+        "status": record.get("status", "idle"),
+        "error": record.get("error", ""),
+        "createdAt": record.get("created_at", ""),
+        "updatedAt": record.get("updated_at", ""),
+        "config": {
+            "rounds": int(record.get("rounds", 0) or 0),
+            "dryRun": bool(record.get("dry_run", False)),
+            "participants": [participant_payload_to_api(item) for item in participants],
+            "summarizerId": summarizer_id,
+            "summarizerLabel": summarizer_label,
+        },
+        "turnCount": int(record.get("turn_count", 0) or 0),
+        "hasSummary": bool(record.get("has_summary", False)),
+        "isActive": False if should_run_inline() else is_active_run(record["id"]),
+    }
+    if include_turns:
+        payload["turns"] = [turn_to_api(turn) for turn in turns if not turn.get("is_summary")]
+        payload["summaryMarkdown"] = str(record.get("summary_markdown", "") or "")
+    return payload
+
+
+def conversation_snapshot_from_run_dir(run_dir: Path) -> Dict[str, Any]:
+    metadata = read_json(run_dir / "run.json", {})
+    state = read_web_state(run_dir)
+    turns = metadata.get("turns", []) or []
+    summary_turn = next((turn for turn in reversed(turns) if turn.get("is_summary")), None)
+    summary_markdown = str(summary_turn.get("response_text", "")).strip() if summary_turn else ""
+    if not summary_markdown and (run_dir / "summary.md").exists():
+        summary_markdown = (run_dir / "summary.md").read_text(encoding="utf-8").strip()
+    question = str(metadata.get("question") or state.get("question") or run_dir.name).strip()
+    title = question if len(question) <= 72 else question[:69] + "..."
+    status = state.get("status", "idle")
+    if summary_markdown and turns:
+        status = "completed"
+    elif status == "running" and not should_run_inline() and not is_active_run(run_dir.name):
+        status = "interrupted"
+    return {
+        "id": run_dir.name,
+        "owner_user_id": str(state.get("owner_user_id", "")).strip(),
+        "owner_email": str(state.get("owner_email", "")).strip(),
+        "question": question,
+        "title": title,
+        "status": status,
+        "error": str(state.get("error", "") or ""),
+        "traceback": str(state.get("traceback", "") or ""),
+        "created_at": str(state.get("created_at") or metadata.get("generated_at") or ""),
+        "updated_at": str(state.get("updated_at") or metadata.get("generated_at") or ""),
+        "started_at": str(state.get("started_at", "") or ""),
+        "completed_at": str(state.get("completed_at", "") or ""),
+        "failed_at": str(state.get("failed_at", "") or ""),
+        "rounds": int(metadata.get("rounds", 0) or 0),
+        "dry_run": bool(metadata.get("dry_run", False)),
+        "participants": metadata.get("participants", []) or [],
+        "summarizer_id": str(metadata.get("summarizer_id", "") or ""),
+        "summary_markdown": summary_markdown,
+        "turns": turns,
+        "turn_count": len([turn for turn in turns if not turn.get("is_summary")]),
+        "has_summary": bool(summary_markdown),
+        "runtime_source": storage.runtime_source(),
+        "runtime_host": storage.runtime_host(),
+    }
+
+
+def sync_run_dir_to_storage(run_dir: Path) -> None:
+    if not durable_storage_enabled():
+        return
+    storage.upsert_conversation(conversation_snapshot_from_run_dir(run_dir))
+
+
+def backfill_runs_to_storage() -> None:
+    if not durable_storage_enabled():
+        return
+    if not RUNS_ROOT.exists():
+        return
+    for path in RUNS_ROOT.iterdir():
+        if is_run_dir(path):
+            sync_run_dir_to_storage(path)
+
+
+def resume_state_from_storage(run_id: str) -> orch.ResumeState:
+    record = storage.fetch_conversation(run_id)
+    if not record:
+        raise FileNotFoundError(f"No conversation found for {run_id}")
+    participants = orch.participants_from_payload(record.get("participants", []))
+    turns = [orch.turn_from_dict(item) for item in record.get("turns", [])]
+    summarizer_id = str(record.get("summarizer_id", "") or (participants[-1].participant_id if participants else ""))
+    metadata = {
+        "question": record.get("question", ""),
+        "rounds": int(record.get("rounds", 0) or 0),
+        "participants": record.get("participants", []),
+        "summarizer_id": summarizer_id,
+        "turns": record.get("turns", []),
+        "dry_run": bool(record.get("dry_run", False)),
+    }
+    return orch.ResumeState(
+        run_dir=RUNS_ROOT / run_id,
+        metadata=metadata,
+        question=str(record.get("question", "")),
+        rounds=int(record.get("rounds", 0) or 0),
+        participants=participants,
+        summarizer_id=summarizer_id,
+        turns=turns,
+        summary_markdown=str(record.get("summary_markdown", "") or ""),
+    )
+
+
 def run_owner_id(run_dir: Path) -> str:
+    if durable_storage_enabled():
+        record = storage.fetch_conversation(run_dir.name)
+        return str(record.get("owner_user_id", "")).strip() if record else ""
     state = read_web_state(run_dir)
     return str(state.get("owner_user_id", "")).strip()
 
@@ -512,6 +762,11 @@ def run_owner_id(run_dir: Path) -> str:
 def user_can_access_run(run_dir: Path, user: Optional[Dict[str, Any]]) -> bool:
     if not user:
         return False
+    if durable_storage_enabled():
+        record = storage.fetch_conversation(run_dir.name)
+        if not record:
+            return False
+        return user.get("id") == str(record.get("owner_user_id", "")).strip()
     owner_id = run_owner_id(run_dir)
     if not owner_id:
         return False
@@ -519,6 +774,8 @@ def user_can_access_run(run_dir: Path, user: Optional[Dict[str, Any]]) -> bool:
 
 
 def assign_ownerless_runs_to_user(user: Dict[str, Any]) -> int:
+    if durable_storage_enabled():
+        return storage.claim_ownerless_conversations(user["id"], user["email"])
     assigned = 0
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     for path in RUNS_ROOT.iterdir():
@@ -640,6 +897,10 @@ def fetch_google_profile(access_token: str) -> Dict[str, Any]:
 
 
 def list_conversations(user: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    if durable_storage_enabled():
+        if not user:
+            return []
+        return [build_conversation_payload_from_record(item, include_turns=False) for item in storage.list_conversations_for_user(user["id"])]
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     conversations = [
         build_conversation_payload(path, include_turns=False)
@@ -693,6 +954,7 @@ def persist_progress(
             "last_turns": len(turns),
         },
     )
+    sync_run_dir_to_storage(run_dir)
 
 
 def execute_conversation(
@@ -720,6 +982,7 @@ def execute_conversation(
             "started_at": iso_now(),
         },
     )
+    sync_run_dir_to_storage(run_dir)
 
     try:
         while True:
@@ -735,6 +998,7 @@ def execute_conversation(
                 )
                 orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
                 orch.write_run_metadata(run_dir, question, rounds, participants, summarizer_id, turns, dry_run)
+                sync_run_dir_to_storage(run_dir)
                 return
 
             if step == "participant" and participant is not None:
@@ -802,6 +1066,7 @@ def execute_conversation(
                     "error": "",
                 },
             )
+            sync_run_dir_to_storage(run_dir)
             return
     except orch.ApiError as exc:
         orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
@@ -814,6 +1079,7 @@ def execute_conversation(
                 "failed_at": iso_now(),
             },
         )
+        sync_run_dir_to_storage(run_dir)
     except Exception as exc:  # pragma: no cover
         orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
         orch.write_run_metadata(run_dir, question, rounds, participants, summarizer_id, turns, dry_run)
@@ -826,6 +1092,7 @@ def execute_conversation(
                 "failed_at": iso_now(),
             },
         )
+        sync_run_dir_to_storage(run_dir)
     finally:
         clear_active_run(run_id)
 
@@ -868,6 +1135,7 @@ def start_new_conversation(payload: Dict[str, Any], user: Optional[Dict[str, Any
         [],
         parsed["dry_run"],
     )
+    sync_run_dir_to_storage(run_dir)
 
     if should_run_inline():
         execute_conversation(
@@ -896,19 +1164,29 @@ def start_new_conversation(payload: Dict[str, Any], user: Optional[Dict[str, Any
     )
     register_active_run(run_dir.name, thread)
     thread.start()
+    sync_run_dir_to_storage(run_dir)
     return build_conversation_payload(run_dir)
 
 
 def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     run_dir = RUNS_ROOT / run_id
-    if not is_run_dir(run_dir):
+    if durable_storage_enabled():
+        record = storage.fetch_conversation(run_id)
+        if not record:
+            raise FileNotFoundError(f"No conversation found for {run_id}")
+        if (not user) or (user.get("id") != str(record.get("owner_user_id", "")).strip()):
+            raise PermissionError("You do not have access to that conversation.")
+    elif not is_run_dir(run_dir):
         raise FileNotFoundError(f"No conversation found for {run_id}")
-    if not user_can_access_run(run_dir, user):
+    if not durable_storage_enabled() and not user_can_access_run(run_dir, user):
         raise PermissionError("You do not have access to that conversation.")
     if is_active_run(run_id):
+        if durable_storage_enabled():
+            record = storage.fetch_conversation(run_id)
+            return build_conversation_payload_from_record(record) if record else build_conversation_payload(run_dir)
         return build_conversation_payload(run_dir)
 
-    resume_state = orch.load_resume_state(str(run_dir))
+    resume_state = resume_state_from_storage(run_id) if durable_storage_enabled() else orch.load_resume_state(str(run_dir))
     participant_payloads = payload.get("participants") or [orch.participant_to_metadata(item) for item in resume_state.participants]
     runtime_keys = (
         {}
@@ -918,6 +1196,7 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
 
     if should_run_inline():
         write_web_state(run_dir, {"status": "running", "error": ""})
+        sync_run_dir_to_storage(run_dir)
         execute_conversation(
             run_dir,
             resume_state.question,
@@ -928,6 +1207,9 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
             bool(resume_state.metadata.get("dry_run", False)),
             resume_state,
         )
+        if durable_storage_enabled():
+            record = storage.fetch_conversation(run_id)
+            return build_conversation_payload_from_record(record) if record else build_conversation_payload(run_dir)
         return build_conversation_payload(run_dir)
 
     thread = threading.Thread(
@@ -947,6 +1229,10 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
     register_active_run(run_id, thread)
     thread.start()
     write_web_state(run_dir, {"status": "running", "error": ""})
+    sync_run_dir_to_storage(run_dir)
+    if durable_storage_enabled():
+        record = storage.fetch_conversation(run_id)
+        return build_conversation_payload_from_record(record) if record else build_conversation_payload(run_dir)
     return build_conversation_payload(run_dir)
 
 
@@ -976,15 +1262,21 @@ class AppHandler(BaseHTTPRequestHandler):
         token = cookie.get(SESSION_COOKIE_NAME)
         return user_for_session_token(token.value if token else "")
 
+    def cookie_security_suffix(self) -> str:
+        base = str(os.environ.get("PANTHEON_BASE_URL", "")).strip().lower()
+        if IS_VERCEL or base.startswith("https://"):
+            return "; Secure"
+        return ""
+
     def session_cookie_header(self, token: str, expires: bool = False) -> str:
         if expires:
-            return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-        return f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}"
+            return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{self.cookie_security_suffix()}"
+        return f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}{self.cookie_security_suffix()}"
 
     def google_state_cookie_header(self, token: str, expires: bool = False) -> str:
         if expires:
-            return f"{GOOGLE_STATE_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-        return f"{GOOGLE_STATE_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={GOOGLE_STATE_MAX_AGE}"
+            return f"{GOOGLE_STATE_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{self.cookie_security_suffix()}"
+        return f"{GOOGLE_STATE_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={GOOGLE_STATE_MAX_AGE}{self.cookie_security_suffix()}"
 
     def redirect(self, location: str, headers: Optional[Dict[str, Any]] = None) -> None:
         self.send_response(HTTPStatus.FOUND)
@@ -1085,6 +1377,18 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"providers": provider_catalog(), "maxParticipants": orch.MAX_PARTICIPANTS})
             return
 
+        if parsed.path == "/api/health":
+            self.send_json(
+                {
+                    "ok": True,
+                    "storage": "database" if durable_storage_enabled() else "local",
+                    "runtime": "vercel" if IS_VERCEL else "local",
+                    "baseUrl": app_base_url(self),
+                    "googleAuthEnabled": google_auth_enabled(),
+                }
+            )
+            return
+
         if parsed.path == "/api/auth/me":
             self.send_json({"user": user_payload(self.current_user()), "googleAuthEnabled": google_auth_enabled()})
             return
@@ -1105,6 +1409,14 @@ class AppHandler(BaseHTTPRequestHandler):
             parts = [part for part in parsed.path.split("/") if part]
             if len(parts) == 3:
                 run_id = parts[2]
+                if durable_storage_enabled():
+                    record = storage.fetch_conversation(run_id)
+                    user = self.current_user()
+                    if not record or not user or user.get("id") != str(record.get("owner_user_id", "")).strip():
+                        self.send_json({"error": "Conversation not found."}, status=HTTPStatus.NOT_FOUND)
+                        return
+                    self.send_json(build_conversation_payload_from_record(record))
+                    return
                 run_dir = RUNS_ROOT / run_id
                 if not is_run_dir(run_dir):
                     self.send_json({"error": "Conversation not found."}, status=HTTPStatus.NOT_FOUND)
@@ -1280,6 +1592,7 @@ def main() -> int:
     args = parse_server_args()
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     init_auth_db()
+    backfill_runs_to_storage()
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
     print(f"Pantheon running at http://{args.host}:{args.port}")
     try:

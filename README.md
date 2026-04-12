@@ -53,6 +53,48 @@ The conversation page shows:
 - the transcript grouped by round
 - a single final synthesis section at the bottom
 
+## Production Backend
+
+Pantheon can run with a durable shared backend by setting `DATABASE_URL`.
+
+When `DATABASE_URL` is present:
+
+- accounts are stored in the database
+- sessions are stored in the database
+- conversation ownership is stored in the database
+- transcripts, summaries, run metadata, and status are stored in the database
+- local and Vercel environments can share the same customer accounts and saved runs
+
+Recommended production env vars:
+
+```bash
+DATABASE_URL=postgresql://...
+POSTGRES_URL=postgresql://...
+PANTHEON_BASE_URL=https://your-project.vercel.app
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+```
+
+For Vercel, use the same `DATABASE_URL` in every environment where you want the same customer data to appear.
+
+Pantheon also exposes a health endpoint:
+
+```text
+/api/health
+```
+
+If you already have local SQLite users and file-based runs, migrate them into the production database with:
+
+```bash
+python3 scripts/migrate_local_to_database.py
+```
+
+Smoke test the production backend with:
+
+```bash
+python3 scripts/verify_database_backend.py
+```
+
 ### Google Sign-In
 
 Pantheon supports `Continue with Google` on the login and signup pages.

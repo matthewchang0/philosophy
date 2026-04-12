@@ -6,6 +6,7 @@ import webapp
 webapp.orch.load_dotenv(webapp.APP_ROOT / ".env")
 webapp.RUNS_ROOT.mkdir(parents=True, exist_ok=True)
 webapp.init_auth_db()
+webapp.backfill_runs_to_storage()
 
 
 class handler(webapp.AppHandler):

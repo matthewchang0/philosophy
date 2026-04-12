@@ -243,6 +243,24 @@ function timeLabel(value) {
   });
 }
 
+function fullTimeLabel(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 function conversationUrl(id) {
   return `/conversations/${encodeURIComponent(id)}`;
 }
@@ -1131,6 +1149,10 @@ function renderAccountPage() {
     <div class="account-row">
       <span class="account-label">Email</span>
       <strong>${escapeHtml(state.user.email)}</strong>
+    </div>
+    <div class="account-row">
+      <span class="account-label">Created</span>
+      <strong>${escapeHtml(fullTimeLabel(state.user.createdAt) || "Unknown")}</strong>
     </div>
     <div class="account-row">
       <span class="account-label">Last activity</span>
