@@ -1,15 +1,8 @@
 <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="favbg" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#FFBF5B"/>
-      <stop offset="0.5" stop-color="#FF835C"/>
-      <stop offset="1" stop-color="#76C8FF"/>
-    </linearGradient>
-  </defs>
-  <rect x="4" y="4" width="56" height="56" rx="18" fill="url(#favbg)"/>
-  <path d="M18 22C18 17.582 21.582 14 26 14H31C39.837 14 47 21.163 47 30C47 38.837 39.837 46 31 46H28L20 52V46.5C18.798 45.838 18 44.559 18 43V22Z" fill="#FFF6EA"/>
-  <path d="M46 49L39 43H36C28.82 43 23 37.18 23 30C23 22.82 28.82 17 36 17H39C43.418 17 47 20.582 47 25V42.5C47 45.031 46.666 47.198 46 49Z" fill="#E6F5FF"/>
-  <circle cx="27.5" cy="30" r="2.3" fill="#F28A54"/>
-  <circle cx="32" cy="30" r="2.3" fill="#F1B14A"/>
-  <circle cx="36.5" cy="30" r="2.3" fill="#77C5F8"/>
+  <path d="M32 10L52 22H12L32 10Z" fill="#121212"/>
+  <path d="M14 25H50V30H14V25Z" fill="#121212"/>
+  <path d="M17 30H22V49H17V30Z" fill="#121212"/>
+  <path d="M29 30H35V49H29V30Z" fill="#121212"/>
+  <path d="M42 30H47V49H42V30Z" fill="#121212"/>
+  <path d="M13 49H51V54H13V49Z" fill="#121212"/>
 </svg>

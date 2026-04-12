@@ -1,44 +1,36 @@
-# Duet Lab
+# Pantheon
 
-Duet Lab is a multi-model collaboration tool that pairs one OpenAI model with one Anthropic model, lets them work through a request in turns, and saves everything to disk.
+Pantheon is a multi-model conversation studio for OpenAI, Anthropic, Gemini, and xAI.
 
-It supports both:
+Users choose which models participate, paste their own API keys in the web app, select which participant writes the final synthesis, and watch the full conversation unfold round by round.
 
-- a CLI orchestrator
-- a lightweight web app with a playful chat-style UI
+## What Changed
 
-You can use it for philosophy, coding, research, planning, writing, or any other task where two strong models comparing and refining each other's ideas is useful.
+- The app no longer assumes only OpenAI plus Anthropic.
+- Users can choose 1 to 5 participants.
+- Each participant can use a different provider and model.
+- API keys come from the user at runtime and are not written into `run.json`.
+- The conversation framing is open-ended and collaborative.
+- The final synthesis is now one compact section with:
+  - `Snapshot`
+  - `Where They Agreed`
+  - `Where They Disagreed`
+  - `Best Answer Right Now`
 
-## What it does
+## Providers
 
-- Alternates OpenAI and Anthropic turns for a configurable number of rounds
-- Lets you choose different models for each provider per run
-- Uses web search when enabled by provider settings
-- Renders Markdown formatting in the browser
-- Shows each round in two side-by-side columns
-- Saves transcripts, summaries, and structured JSON metadata
-- Supports resuming interrupted runs
-- Supports dry-run mode so you can test without spending credits
+Pantheon currently supports:
 
-## Environment
+- OpenAI
+- Anthropic
+- Gemini
+- xAI
 
-Put your keys in `.env` using either naming style:
-
-```bash
-OPENAI_API=your-openai-key
-ANTHROPIC_API=your-anthropic-key
-```
-
-or:
-
-```bash
-OPENAI_API_KEY=your-openai-key
-ANTHROPIC_API_KEY=your-anthropic-key
-```
+Suggested models are exposed directly in the UI.
 
 ## Website
 
-Start the web app:
+Start the app:
 
 ```bash
 python3 webapp.py
@@ -46,70 +38,50 @@ python3 webapp.py
 
 Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-The web app gives you:
+The home page lets users:
 
-- a sidebar of saved requests
-- a composer for new requests
-- model pickers for OpenAI and Anthropic
-- configurable rounds
-- Anthropic web search mode
-- a dry-run toggle for testing the UI and orchestration flow without API calls
-- side-by-side model responses with Markdown rendering
-- resume support for interrupted or failed runs
+- enter a prompt
+- choose 1 to 5 participants
+- choose provider and model per participant
+- paste an API key per participant
+- choose the final synthesizer
+- run a dry run without hitting any provider API
 
-## CLI Usage
+The conversation page shows:
 
-Basic run:
+- the selected participant roster
+- the transcript grouped by round
+- a single final synthesis section at the bottom
+
+## CLI
+
+There is still a terminal entry point:
 
 ```bash
-python3 orchestrator.py "Design a robust background job system for a SaaS app."
+python3 orchestrator.py "Compare two launch strategies for a new SaaS product." --dry-run
 ```
 
-Current defaults:
-
-- OpenAI: `--openai-model gpt-5.4 --openai-reasoning none --openai-max-output-tokens 4000`
-- Anthropic: `--anthropic-model claude-sonnet-4-6 --anthropic-max-output-tokens 1400`
-
-Longer run:
+For richer CLI usage, pass participants as JSON:
 
 ```bash
-python3 orchestrator.py "What is the meaning of life?" --rounds 8
-```
-
-Resume an interrupted run:
-
-```bash
-python3 orchestrator.py --resume runs/20260410-170041-what-is-the-meaning-of-life
-```
-
-Dry validation without spending API credits:
-
-```bash
-python3 orchestrator.py "What is justice?" --dry-run
-```
-
-If you add `--dry-run` to a resume, the script writes a non-destructive preview under `.dry-run-preview/` inside that run folder.
-
-If Anthropic web search is unavailable in your account and you want the run to continue anyway:
-
-```bash
-python3 orchestrator.py "What is justice?" --fallback-without-web-search
+python3 orchestrator.py "Design a lightweight API architecture." \
+  --participants-json '[{"participant_id":"openai-1","label":"Athena","provider":"openai","model":"gpt-5.4","max_output_tokens":4000},{"participant_id":"gemini-1","label":"Hermes","provider":"gemini","model":"gemini-2.5-pro","max_output_tokens":1600}]' \
+  --summarizer-id gemini-1
 ```
 
 ## Output
 
-Each run creates a timestamped folder under `runs/`:
+Each run writes a folder under `runs/` with:
 
-- `transcript.md` for the full collaboration log
-- `summary.md` for the final Anthropic synthesis
-- `run.json` for structured metadata and raw turn data
+- `transcript.md`
+- `summary.md`
+- `run.json`
+- `web_state.json`
 
-If a run is interrupted, rerun the CLI with `--resume` pointed at the run directory or its `run.json` file and it will continue from the next missing step.
+`run.json` stores participant configuration and turns, but not API keys.
 
 ## Notes
 
-- Anthropic web search must be enabled for your account to use search-backed turns.
-- Anthropic's dynamic web search mode may require additional account capabilities, so the default remains `basic`.
-- Extended runs can become expensive quickly because both models may search the web repeatedly.
-- OpenAI visible-text failures are handled with an automatic retry using a larger output budget.
-- Retryable rate limits now wait and retry using provider guidance instead of failing immediately.
+- The web app expects user-supplied API keys at request time.
+- If a run is resumed from the web UI, the app asks for keys again if they are not still in browser session storage.
+- Dry runs work without any API key.

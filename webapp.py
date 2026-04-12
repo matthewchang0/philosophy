@@ -2,17 +2,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import mimetypes
+import os
+import secrets
+import sqlite3
 import threading
 import traceback
 from datetime import datetime
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
+from uuid import uuid4
 
 import orchestrator as orch
 
@@ -21,17 +28,11 @@ APP_ROOT = Path(__file__).resolve().parent
 WEB_ROOT = APP_ROOT / "web"
 RUNS_ROOT = APP_ROOT / orch.DEFAULT_OUTPUT_DIR
 WEB_STATE_FILENAME = "web_state.json"
-
-OPENAI_MODEL_OPTIONS = [
-    "gpt-5.4",
-    "gpt-5-mini",
-]
-
-ANTHROPIC_MODEL_OPTIONS = [
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
-    "claude-haiku-4-5",
-]
+AUTH_DB_PATH = APP_ROOT / "pantheon_auth.db"
+SESSION_COOKIE_NAME = "pantheon_session"
+GOOGLE_STATE_COOKIE_NAME = "pantheon_google_state"
+SESSION_MAX_AGE = 60 * 60 * 24 * 30
+GOOGLE_STATE_MAX_AGE = 60 * 10
 
 ACTIVE_RUNS: Dict[str, threading.Thread] = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
@@ -39,52 +40,6 @@ ACTIVE_RUNS_LOCK = threading.Lock()
 
 def iso_now() -> str:
     return datetime.now().isoformat()
-
-
-def make_runtime_args(question: str, payload: Dict[str, Any]) -> SimpleNamespace:
-    args = SimpleNamespace(
-        question=question,
-        rounds=int(payload.get("rounds", orch.DEFAULT_ROUNDS)),
-        dry_run=bool(payload.get("dry_run", False)),
-        openai_model=str(payload.get("openai_model", orch.DEFAULT_OPENAI_MODEL)),
-        anthropic_model=str(payload.get("anthropic_model", orch.DEFAULT_ANTHROPIC_MODEL)),
-        openai_reasoning=str(payload.get("openai_reasoning", orch.DEFAULT_OPENAI_REASONING)),
-        max_output_tokens=None,
-        openai_max_output_tokens=int(
-            payload.get("openai_max_output_tokens", orch.DEFAULT_OPENAI_MAX_OUTPUT_TOKENS)
-        ),
-        anthropic_max_output_tokens=int(
-            payload.get("anthropic_max_output_tokens", orch.DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS)
-        ),
-        anthropic_web_search=str(payload.get("anthropic_web_search", orch.DEFAULT_ANTHROPIC_WEB_SEARCH)),
-        anthropic_max_searches=int(payload.get("anthropic_max_searches", 5)),
-        output_dir=orch.DEFAULT_OUTPUT_DIR,
-        resume=None,
-        fallback_without_web_search=bool(payload.get("fallback_without_web_search", True)),
-    )
-    orch.resolve_token_budgets(args)
-    return args
-
-
-def default_resume_args() -> SimpleNamespace:
-    args = SimpleNamespace(
-        question=None,
-        rounds=orch.DEFAULT_ROUNDS,
-        openai_model=orch.DEFAULT_OPENAI_MODEL,
-        anthropic_model=orch.DEFAULT_ANTHROPIC_MODEL,
-        openai_reasoning=orch.DEFAULT_OPENAI_REASONING,
-        max_output_tokens=None,
-        openai_max_output_tokens=orch.DEFAULT_OPENAI_MAX_OUTPUT_TOKENS,
-        anthropic_max_output_tokens=orch.DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS,
-        anthropic_web_search=orch.DEFAULT_ANTHROPIC_WEB_SEARCH,
-        anthropic_max_searches=5,
-        output_dir=orch.DEFAULT_OUTPUT_DIR,
-        resume=None,
-        fallback_without_web_search=True,
-        dry_run=False,
-    )
-    orch.resolve_token_budgets(args)
-    return args
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -136,15 +91,351 @@ def clear_active_run(run_id: str) -> None:
         ACTIVE_RUNS.pop(run_id, None)
 
 
+def auth_db() -> sqlite3.Connection:
+    connection = sqlite3.connect(AUTH_DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_auth_db() -> None:
+    connection = auth_db()
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              id TEXT PRIMARY KEY,
+              email TEXT NOT NULL UNIQUE,
+              name TEXT NOT NULL DEFAULT '',
+              avatar_url TEXT NOT NULL DEFAULT '',
+              auth_provider TEXT NOT NULL DEFAULT 'local',
+              password_salt TEXT NOT NULL,
+              password_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+              token TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL,
+              FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id)")
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+        if "name" not in columns:
+            connection.execute("ALTER TABLE users ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+        if "avatar_url" not in columns:
+            connection.execute("ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
+        if "auth_provider" not in columns:
+            connection.execute("ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'local'")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def normalize_email(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def normalize_name(value: str) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def hash_password(password: str, salt_hex: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 310_000).hex()
+
+
+def create_user(email: str, password: str, name: str = "", avatar_url: str = "", auth_provider: str = "local") -> Dict[str, Any]:
+    normalized_email = normalize_email(email)
+    normalized_name = normalize_name(name)
+    if "@" not in normalized_email or "." not in normalized_email.split("@")[-1]:
+        raise ValueError("Enter a valid email address.")
+    if not normalized_name:
+        raise ValueError("Enter your name.")
+    if len(password) < 8:
+        raise ValueError("Passwords must be at least 8 characters.")
+
+    user = {
+        "id": uuid4().hex,
+        "email": normalized_email,
+        "name": normalized_name,
+        "avatar_url": str(avatar_url or "").strip(),
+        "auth_provider": str(auth_provider or "local").strip() or "local",
+        "password_salt": secrets.token_hex(16),
+        "created_at": iso_now(),
+    }
+    user["password_hash"] = hash_password(password, user["password_salt"])
+
+    connection = auth_db()
+    try:
+        try:
+            connection.execute(
+                """
+                INSERT INTO users (id, email, name, avatar_url, auth_provider, password_salt, password_hash, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user["id"],
+                    user["email"],
+                    user["name"],
+                    user["avatar_url"],
+                    user["auth_provider"],
+                    user["password_salt"],
+                    user["password_hash"],
+                    user["created_at"],
+                ),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("An account with that email already exists.") from exc
+    finally:
+        connection.close()
+    return user
+
+
+def upsert_google_user(email: str, name: str, avatar_url: str = "") -> Dict[str, Any]:
+    normalized_email = normalize_email(email)
+    normalized_name = normalize_name(name)
+    if "@" not in normalized_email or "." not in normalized_email.split("@")[-1]:
+        raise ValueError("Enter a valid email address.")
+    if not normalized_name:
+        raise ValueError("Google did not return a valid name.")
+
+    connection = auth_db()
+    try:
+        row = connection.execute(
+            "SELECT id, email, name, avatar_url, auth_provider, created_at FROM users WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+        if row is None:
+            user = {
+                "id": uuid4().hex,
+                "email": normalized_email,
+                "name": normalized_name,
+                "avatar_url": str(avatar_url or "").strip(),
+                "auth_provider": "google",
+                "password_salt": secrets.token_hex(16),
+                "created_at": iso_now(),
+            }
+            user["password_hash"] = hash_password(secrets.token_urlsafe(32), user["password_salt"])
+            connection.execute(
+                """
+                INSERT INTO users (id, email, name, avatar_url, auth_provider, password_salt, password_hash, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user["id"],
+                    user["email"],
+                    user["name"],
+                    user["avatar_url"],
+                    user["auth_provider"],
+                    user["password_salt"],
+                    user["password_hash"],
+                    user["created_at"],
+                ),
+            )
+            connection.commit()
+            return {
+                "id": user["id"],
+                "email": user["email"],
+                "name": user["name"],
+                "avatar_url": user["avatar_url"],
+                "auth_provider": user["auth_provider"],
+                "created_at": user["created_at"],
+            }
+
+        updated_name = normalized_name or row["name"]
+        updated_avatar = str(avatar_url or "").strip() or row["avatar_url"]
+        connection.execute(
+            "UPDATE users SET name = ?, avatar_url = ? WHERE id = ?",
+            (updated_name, updated_avatar, row["id"]),
+        )
+        connection.commit()
+        return {
+            "id": row["id"],
+            "email": row["email"],
+            "name": updated_name,
+            "avatar_url": updated_avatar,
+            "auth_provider": row["auth_provider"],
+            "created_at": row["created_at"],
+        }
+    finally:
+        connection.close()
+
+
+def authenticate_user(email: str, password: str) -> Dict[str, Any]:
+    normalized_email = normalize_email(email)
+    connection = auth_db()
+    try:
+        row = connection.execute(
+            "SELECT id, email, name, avatar_url, auth_provider, password_salt, password_hash, created_at FROM users WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        raise ValueError("Invalid email or password.")
+    candidate = hash_password(password, row["password_salt"])
+    if not hmac.compare_digest(candidate, row["password_hash"]):
+        raise ValueError("Invalid email or password.")
+    return dict(row)
+
+
+def user_by_email(email: str) -> Optional[Dict[str, Any]]:
+    normalized_email = normalize_email(email)
+    connection = auth_db()
+    try:
+        row = connection.execute(
+            "SELECT id, email, name, avatar_url, auth_provider, created_at FROM users WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return dict(row) if row is not None else None
+
+
+def change_user_password(user_id: str, current_password: str, new_password: str) -> None:
+    if len(new_password) < 8:
+        raise ValueError("New passwords must be at least 8 characters.")
+    connection = auth_db()
+    try:
+        row = connection.execute(
+            "SELECT id, password_salt, password_hash FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("User not found.")
+        current_hash = hash_password(current_password, row["password_salt"])
+        if not hmac.compare_digest(current_hash, row["password_hash"]):
+            raise ValueError("Current password is incorrect.")
+        new_salt = secrets.token_hex(16)
+        new_hash = hash_password(new_password, new_salt)
+        connection.execute(
+            "UPDATE users SET password_salt = ?, password_hash = ? WHERE id = ?",
+            (new_salt, new_hash, user_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def create_session(user_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    created_at = iso_now()
+    expires_at = datetime.fromtimestamp(datetime.now().timestamp() + SESSION_MAX_AGE).isoformat()
+    connection = auth_db()
+    try:
+        connection.execute(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token, user_id, created_at, expires_at),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return token
+
+
+def delete_session(token: str) -> None:
+    if not token:
+        return
+    connection = auth_db()
+    try:
+        connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def user_for_session_token(token: str) -> Optional[Dict[str, Any]]:
+    if not token:
+        return None
+    connection = auth_db()
+    try:
+        row = connection.execute(
+            """
+            SELECT users.id, users.email, users.name, users.avatar_url, users.auth_provider, users.created_at, sessions.expires_at
+            FROM sessions
+            JOIN users ON users.id = sessions.user_id
+            WHERE sessions.token = ?
+            """,
+            (token,),
+        ).fetchone()
+        if row is None:
+            return None
+        expires_at = str(row["expires_at"])
+        if expires_at and datetime.fromisoformat(expires_at) <= datetime.now():
+            connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            connection.commit()
+            return None
+        return {
+            "id": row["id"],
+            "email": row["email"],
+            "name": row["name"],
+            "avatar_url": row["avatar_url"],
+            "auth_provider": row["auth_provider"],
+            "created_at": row["created_at"],
+        }
+    finally:
+        connection.close()
+
+
+def user_payload(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not user:
+        return None
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "name": user.get("name", ""),
+        "avatarUrl": user.get("avatar_url", ""),
+        "authProvider": user.get("auth_provider", "local"),
+        "createdAt": user.get("created_at", ""),
+    }
+
+
+def provider_catalog() -> List[Dict[str, Any]]:
+    providers = []
+    for provider_id, label in orch.PROVIDER_LABELS.items():
+        models = orch.MODEL_SUGGESTIONS.get(provider_id, [])
+        providers.append(
+            {
+                "id": provider_id,
+                "label": label,
+                "suggestedModels": models,
+                "defaultModel": models[0] if models else "",
+                "defaultMaxOutputTokens": orch.default_tokens_for_provider(provider_id),
+            }
+        )
+    return providers
+
+
+def participant_payload_to_api(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "participantId": payload.get("participant_id", ""),
+        "label": payload.get("label", ""),
+        "provider": payload.get("provider", ""),
+        "model": payload.get("model", ""),
+        "maxOutputTokens": payload.get("max_output_tokens", 0),
+        "reasoning": payload.get("reasoning", "none"),
+    }
+
+
 def turn_to_api(turn: Dict[str, Any]) -> Dict[str, Any]:
     return {
+        "participantId": turn.get("participant_id", ""),
         "speakerLabel": turn.get("speaker_label", ""),
         "model": turn.get("model", ""),
         "provider": turn.get("provider", ""),
         "roundNumber": turn.get("round_number", 0),
+        "turnIndex": turn.get("turn_index", 0),
         "responseText": turn.get("response_text", ""),
         "citations": turn.get("citations", []),
         "usage": turn.get("usage", {}),
+        "isSummary": bool(turn.get("is_summary", False)),
     }
 
 
@@ -152,29 +443,27 @@ def build_conversation_payload(run_dir: Path, include_turns: bool = True) -> Dic
     metadata = read_json(run_dir / "run.json", {})
     state = read_web_state(run_dir)
     turns = metadata.get("turns", [])
-    dry_run = bool(metadata.get("dry_run")) or any(bool((turn.get("usage") or {}).get("dry_run")) for turn in turns)
-    summary_from_turns = ""
-    for turn in reversed(turns):
-        speaker_label = str(turn.get("speaker_label", "")).lower()
-        if "summary" in speaker_label:
-            summary_from_turns = str(turn.get("response_text", "")).strip()
-            break
-
-    summary_path = run_dir / "summary.md"
-    summary_markdown = summary_from_turns
-    if not summary_markdown and summary_path.exists():
-        summary_markdown = summary_path.read_text(encoding="utf-8").strip()
+    summary_turn = next((turn for turn in reversed(turns) if turn.get("is_summary")), None)
+    summary_markdown = str(summary_turn.get("response_text", "")).strip() if summary_turn else ""
+    if not summary_markdown and (run_dir / "summary.md").exists():
+        summary_markdown = (run_dir / "summary.md").read_text(encoding="utf-8").strip()
 
     status = state.get("status", "idle")
-    completed = bool(summary_markdown and turns)
-    if completed:
+    if summary_markdown and turns:
         status = "completed"
     elif status == "running" and not is_active_run(run_dir.name):
         status = "interrupted"
 
+    participants = metadata.get("participants", [])
+    summarizer_id = str(metadata.get("summarizer_id", ""))
+    summarizer_label = ""
+    for participant in participants:
+        if participant.get("participant_id") == summarizer_id:
+            summarizer_label = str(participant.get("label", ""))
+            break
+
     question = str(metadata.get("question") or state.get("question") or run_dir.name).strip()
     title = question if len(question) <= 72 else question[:69] + "..."
-
     payload = {
         "id": run_dir.name,
         "title": title,
@@ -185,45 +474,179 @@ def build_conversation_payload(run_dir: Path, include_turns: bool = True) -> Dic
         "updatedAt": state.get("updated_at") or metadata.get("generated_at") or "",
         "config": {
             "rounds": int(metadata.get("rounds", 0) or 0),
-            "openaiModel": metadata.get("openai_model", ""),
-            "openaiReasoning": metadata.get("openai_reasoning", ""),
-            "openaiMaxOutputTokens": metadata.get("openai_max_output_tokens", ""),
-            "anthropicModel": metadata.get("anthropic_model", ""),
-            "anthropicMaxOutputTokens": metadata.get("anthropic_max_output_tokens", ""),
-            "anthropicWebSearch": metadata.get("anthropic_web_search", ""),
-            "dryRun": dry_run,
+            "dryRun": bool(metadata.get("dry_run", False)),
+            "participants": [participant_payload_to_api(item) for item in participants],
+            "summarizerId": summarizer_id,
+            "summarizerLabel": summarizer_label,
         },
-        "turnCount": len([turn for turn in turns if "summary" not in str(turn.get("speaker_label", "")).lower()]),
+        "turnCount": len([turn for turn in turns if not turn.get("is_summary")]),
         "hasSummary": bool(summary_markdown),
         "isActive": is_active_run(run_dir.name),
     }
     if include_turns:
-        payload["turns"] = [
-            turn_to_api(turn) for turn in turns if "summary" not in str(turn.get("speaker_label", "")).lower()
-        ]
+        payload["turns"] = [turn_to_api(turn) for turn in turns if not turn.get("is_summary")]
         payload["summaryMarkdown"] = summary_markdown
     return payload
 
 
-def list_conversations() -> List[Dict[str, Any]]:
+def run_owner_id(run_dir: Path) -> str:
+    state = read_web_state(run_dir)
+    return str(state.get("owner_user_id", "")).strip()
+
+
+def user_can_access_run(run_dir: Path, user: Optional[Dict[str, Any]]) -> bool:
+    if not user:
+        return False
+    owner_id = run_owner_id(run_dir)
+    if not owner_id:
+        return False
+    return user.get("id") == owner_id
+
+
+def assign_ownerless_runs_to_user(user: Dict[str, Any]) -> int:
+    assigned = 0
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
-    conversations = [build_conversation_payload(path, include_turns=False) for path in RUNS_ROOT.iterdir() if is_run_dir(path)]
+    for path in RUNS_ROOT.iterdir():
+        if not is_run_dir(path):
+            continue
+        state = read_web_state(path)
+        owner_id = str(state.get("owner_user_id", "")).strip()
+        if owner_id:
+            continue
+        write_web_state(
+            path,
+            {
+                "owner_user_id": user["id"],
+                "owner_email": user["email"],
+            },
+        )
+        assigned += 1
+    return assigned
+
+
+def user_run_stats(user: Dict[str, Any]) -> Dict[str, Any]:
+    conversations = list_conversations(user)
+    total_runs = len(conversations)
+    completed_runs = len([item for item in conversations if item.get("status") == "completed"])
+    dry_runs = len([item for item in conversations if item.get("config", {}).get("dryRun")])
+    total_turns = sum(int(item.get("turnCount", 0) or 0) for item in conversations)
+    latest_run = conversations[0].get("updatedAt", "") if conversations else ""
+    return {
+        "totalRuns": total_runs,
+        "completedRuns": completed_runs,
+        "dryRuns": dry_runs,
+        "totalTurns": total_turns,
+        "latestRunAt": latest_run,
+    }
+
+
+def google_auth_enabled() -> bool:
+    return bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"))
+
+
+def google_redirect_uri(handler: "AppHandler") -> str:
+    configured = str(os.environ.get("PANTHEON_BASE_URL", "")).strip().rstrip("/")
+    if configured:
+        return f"{configured}/auth/google/callback"
+    forwarded_proto = str(handler.headers.get("X-Forwarded-Proto", "")).strip()
+    scheme = forwarded_proto or ("https" if handler.headers.get("Host", "").startswith("pantheon") else "http")
+    host = handler.headers.get("Host", "127.0.0.1:8002")
+    return f"{scheme}://{host}/auth/google/callback"
+
+
+def google_authorize_url(handler: "AppHandler", state_token: str) -> str:
+    query = urlencode(
+        {
+            "client_id": os.environ.get("GOOGLE_CLIENT_ID", ""),
+            "redirect_uri": google_redirect_uri(handler),
+            "response_type": "code",
+            "scope": "openid email profile",
+            "access_type": "online",
+            "prompt": "select_account",
+            "state": state_token,
+        }
+    )
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{query}"
+
+
+def exchange_google_code(handler: "AppHandler", code: str) -> Dict[str, Any]:
+    payload = urlencode(
+        {
+            "code": code,
+            "client_id": os.environ.get("GOOGLE_CLIENT_ID", ""),
+            "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+            "redirect_uri": google_redirect_uri(handler),
+            "grant_type": "authorization_code",
+        }
+    ).encode("utf-8")
+    request = Request(
+        "https://oauth2.googleapis.com/token",
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_google_profile(access_token: str) -> Dict[str, Any]:
+    request = Request(
+        "https://openidconnect.googleapis.com/v1/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def list_conversations(user: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    conversations = [
+        build_conversation_payload(path, include_turns=False)
+        for path in RUNS_ROOT.iterdir()
+        if is_run_dir(path) and user_can_access_run(path, user)
+    ]
     conversations.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
     return conversations
 
 
+def parse_request_payload(payload: Dict[str, Any], allow_env_fallback: bool = False) -> Dict[str, Any]:
+    question = str(payload.get("question", "")).strip()
+    participants_raw = payload.get("participants") or []
+    participants = orch.participants_from_payload(participants_raw)
+    rounds = int(payload.get("rounds", orch.DEFAULT_ROUNDS))
+    dry_run = bool(payload.get("dry_run", payload.get("dryRun", False)))
+    if rounds < 1:
+        raise ValueError("Rounds must be at least 1.")
+    summarizer_id = str(payload.get("summarizerId") or participants[-1].participant_id).strip()
+    orch.participant_by_id(participants, summarizer_id)
+    runtime_keys = {} if dry_run else orch.extract_runtime_keys(participants, participants_raw, use_env_fallback=allow_env_fallback)
+    return {
+        "question": question,
+        "rounds": rounds,
+        "participants": participants,
+        "participant_payloads": participants_raw,
+        "runtime_keys": runtime_keys,
+        "summarizer_id": summarizer_id,
+        "dry_run": dry_run,
+    }
+
+
 def persist_progress(
     run_dir: Path,
-    args: SimpleNamespace,
-    turns: List[orch.DebateTurn],
+    question: str,
+    rounds: int,
+    participants: List[orch.ParticipantConfig],
+    summarizer_id: str,
+    turns: List[orch.ConversationTurn],
     summary_markdown: str,
+    dry_run: bool,
 ) -> None:
-    orch.write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-    orch.write_run_metadata(run_dir, args.question, turns, args)
+    orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
+    orch.write_run_metadata(run_dir, question, rounds, participants, summarizer_id, turns, dry_run)
     write_web_state(
         run_dir,
         {
-            "question": args.question,
+            "question": question,
             "status": "running",
             "error": "",
             "last_turns": len(turns),
@@ -231,18 +654,25 @@ def persist_progress(
     )
 
 
-def execute_conversation(run_dir: Path, args: SimpleNamespace, resume_state: Optional[orch.ResumeState] = None) -> None:
+def execute_conversation(
+    run_dir: Path,
+    question: str,
+    rounds: int,
+    participants: List[orch.ParticipantConfig],
+    summarizer_id: str,
+    runtime_keys: Dict[str, str],
+    dry_run: bool,
+    resume_state: Optional[orch.ResumeState] = None,
+) -> None:
     run_id = run_dir.name
     turns = list(resume_state.turns) if resume_state else []
     summary_markdown = resume_state.summary_markdown if resume_state else ""
-    orch.load_dotenv(APP_ROOT / ".env")
-    openai_label = f"OpenAI {args.openai_model}"
-    anthropic_label = f"Anthropic {args.anthropic_model}"
+    summarizer = orch.participant_by_id(participants, summarizer_id)
 
     write_web_state(
         run_dir,
         {
-            "question": args.question,
+            "question": question,
             "status": "running",
             "error": "",
             "created_at": read_web_state(run_dir).get("created_at", iso_now()),
@@ -251,121 +681,8 @@ def execute_conversation(run_dir: Path, args: SimpleNamespace, resume_state: Opt
     )
 
     try:
-        if args.dry_run:
-            while True:
-                step, round_number = orch.determine_next_step(turns, args.rounds)
-                completed_debate_turns = [turn for turn in turns if turn.round_number <= args.rounds]
-                if summary_markdown.strip() and len(completed_debate_turns) >= args.rounds * 2:
-                    step = "done"
-
-                if step == "done":
-                    write_web_state(
-                        run_dir,
-                        {
-                            "status": "completed",
-                            "completed_at": iso_now(),
-                            "error": "",
-                        },
-                    )
-                    orch.write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-                    orch.write_run_metadata(run_dir, args.question, turns, args)
-                    return
-
-                if step == "openai":
-                    openai_prompt = orch.compose_debate_prompt(
-                        speaker_name=openai_label,
-                        counterpart_name=anthropic_label,
-                        question=args.question,
-                        round_number=round_number,
-                        prior_turns=turns,
-                    )
-                    turns.append(
-                        orch.build_stub_turn(
-                            speaker_label=openai_label,
-                            model=args.openai_model,
-                            provider="openai",
-                            round_number=round_number,
-                            prompt=openai_prompt,
-                        )
-                    )
-                    persist_progress(run_dir, args, turns, summary_markdown)
-                    continue
-
-                if step == "anthropic":
-                    anthropic_prompt = orch.compose_debate_prompt(
-                        speaker_name=anthropic_label,
-                        counterpart_name=openai_label,
-                        question=args.question,
-                        round_number=round_number,
-                        prior_turns=turns,
-                    )
-                    turns.append(
-                        orch.build_stub_turn(
-                            speaker_label=anthropic_label,
-                            model=args.anthropic_model,
-                            provider="anthropic",
-                            round_number=round_number,
-                            prompt=anthropic_prompt,
-                        )
-                    )
-                    persist_progress(run_dir, args, turns, summary_markdown)
-                    continue
-
-                if step == "summary":
-                    summary_markdown = "\n".join(
-                        [
-                            "# Claude's Final Wrap-Up",
-                            "",
-                            "## Final Verdict",
-                            "",
-                            f"[dry-run] {anthropic_label} would give the direct answer here.",
-                            "",
-                            "## Agreements",
-                            "",
-                            f"- [dry-run] Shared ground from {openai_label} and {anthropic_label}.",
-                            "",
-                            "## Disagreements",
-                            "",
-                            f"- [dry-run] Remaining differences between {openai_label} and {anthropic_label}.",
-                            "",
-                            f"## Best Insight from {openai_label}",
-                            "",
-                            f"[dry-run] Strongest contribution from {openai_label}.",
-                            "",
-                            f"## Best Insight from {anthropic_label}",
-                            "",
-                            f"[dry-run] Strongest contribution from {anthropic_label}.",
-                            "",
-                            "## Conclusion",
-                            "",
-                            f"[dry-run] {anthropic_label} would close with a concise conclusion here.",
-                            "",
-                            "## Sources Mentioned",
-                            "",
-                            "- [dry-run] No live sources fetched.",
-                        ]
-                    )
-                    orch.write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-                    orch.write_run_metadata(run_dir, args.question, turns, args)
-                    write_web_state(
-                        run_dir,
-                        {
-                            "status": "completed",
-                            "completed_at": iso_now(),
-                            "error": "",
-                        },
-                    )
-                    return
-
-                raise RuntimeError(f"Unknown step type {step!r}")
-
-        api_keys = orch.require_api_keys()
         while True:
-            step, round_number = orch.determine_next_step(turns, args.rounds)
-            completed_debate_turns = [turn for turn in turns if turn.round_number <= args.rounds]
-            if summary_markdown.strip() and len(completed_debate_turns) >= args.rounds * 2:
-                step = "done"
-
+            step, round_number, participant = orch.determine_next_step(turns, participants, rounds)
             if step == "done":
                 write_web_state(
                     run_dir,
@@ -375,138 +692,79 @@ def execute_conversation(run_dir: Path, args: SimpleNamespace, resume_state: Opt
                         "error": "",
                     },
                 )
-                orch.write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-                orch.write_run_metadata(run_dir, args.question, turns, args)
+                orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
+                orch.write_run_metadata(run_dir, question, rounds, participants, summarizer_id, turns, dry_run)
                 return
 
-            if step == "openai":
-                openai_prompt = orch.compose_debate_prompt(
-                    speaker_name=openai_label,
-                    counterpart_name=anthropic_label,
-                    question=args.question,
-                    round_number=round_number,
-                    prior_turns=turns,
-                )
-                openai_raw = orch.call_openai(
-                    api_key=api_keys["openai"],
-                    model=args.openai_model,
-                    prompt=openai_prompt,
-                    reasoning=args.openai_reasoning,
-                    max_output_tokens=args.openai_max_output_tokens,
-                )
-                openai_response_text = orch.extract_openai_text(openai_raw)
-                openai_prompt_for_log = openai_prompt
-                if orch.should_retry_openai_for_visible_text(openai_raw, openai_response_text):
-                    retry_raw = orch.retry_openai_with_more_headroom(
-                        api_key=api_keys["openai"],
-                        model=args.openai_model,
-                        prompt=openai_prompt,
-                        reasoning=args.openai_reasoning,
-                        max_output_tokens=args.openai_max_output_tokens,
-                    )
-                    if retry_raw is not None:
-                        openai_raw = retry_raw
-                        openai_response_text = orch.extract_openai_text(openai_raw)
-                        openai_prompt_for_log = (
-                            openai_prompt
-                            + "\n\n[auto-retry] The first OpenAI attempt exhausted max_output_tokens "
-                            + "before producing visible text, so the orchestrator retried with a larger budget."
-                        )
-                turns.append(
-                    orch.DebateTurn(
-                        speaker_label=openai_label,
-                        model=openai_raw.get("model", args.openai_model),
-                        provider="openai",
+            if step == "participant" and participant is not None:
+                prompt = orch.compose_turn_prompt(participant, question, round_number, participants, summarizer, turns)
+                if dry_run:
+                    turn = orch.build_stub_turn(
+                        participant=participant,
                         round_number=round_number,
-                        prompt=openai_prompt_for_log,
-                        response_text=orch.normalize_response_text(openai_response_text),
-                        citations=orch.extract_openai_citations(openai_raw),
-                        usage=openai_raw.get("usage", {}),
-                        raw_response=openai_raw,
+                        turn_index=len([item for item in turns if not item.is_summary]) + 1,
+                        prompt=prompt,
                     )
-                )
-                persist_progress(run_dir, args, turns, summary_markdown)
+                else:
+                    raw_response = orch.call_provider(participant, runtime_keys[participant.participant_id], prompt)
+                    turn = orch.ConversationTurn(
+                        participant_id=participant.participant_id,
+                        speaker_label=participant.label,
+                        provider=participant.provider,
+                        model=raw_response.get("model", participant.model),
+                        round_number=round_number,
+                        turn_index=len([item for item in turns if not item.is_summary]) + 1,
+                        prompt=prompt,
+                        response_text=orch.normalize_response_text(orch.extract_response_text(participant, raw_response)),
+                        citations=orch.extract_response_citations(participant, raw_response),
+                        usage=raw_response.get("usage", {}),
+                        raw_response=raw_response,
+                    )
+                turns.append(turn)
+                persist_progress(run_dir, question, rounds, participants, summarizer_id, turns, summary_markdown, dry_run)
                 continue
 
-            if step == "anthropic":
-                anthropic_prompt = orch.compose_debate_prompt(
-                    speaker_name=anthropic_label,
-                    counterpart_name=openai_label,
-                    question=args.question,
-                    round_number=round_number,
-                    prior_turns=turns,
-                )
-                anthropic_raw = orch.call_anthropic(
-                    api_key=api_keys["anthropic"],
-                    model=args.anthropic_model,
-                    prompt=anthropic_prompt,
-                    max_output_tokens=args.anthropic_max_output_tokens,
-                    web_search_mode=args.anthropic_web_search,
-                    max_searches=args.anthropic_max_searches,
-                    fallback_without_web_search=args.fallback_without_web_search,
-                )
-                turns.append(
-                    orch.DebateTurn(
-                        speaker_label=anthropic_label,
-                        model=anthropic_raw.get("model", args.anthropic_model),
-                        provider="anthropic",
-                        round_number=round_number,
-                        prompt=anthropic_prompt,
-                        response_text=orch.normalize_response_text(orch.extract_anthropic_text(anthropic_raw)),
-                        citations=orch.extract_anthropic_citations(anthropic_raw),
-                        usage=anthropic_raw.get("usage", {}),
-                        raw_response=anthropic_raw,
-                    )
-                )
-                persist_progress(run_dir, args, turns, summary_markdown)
-                continue
-
-            if step == "summary":
-                summary_prompt = orch.compose_summary_prompt(
-                    args.question,
-                    turns,
-                    openai_label=openai_label,
-                    anthropic_label=anthropic_label,
-                )
-                summary_raw = orch.call_anthropic(
-                    api_key=api_keys["anthropic"],
-                    model=args.anthropic_model,
+            summary_prompt = orch.compose_summary_prompt(question, participants, summarizer, turns)
+            if dry_run:
+                summary_turn = orch.build_stub_turn(
+                    participant=summarizer,
+                    round_number=rounds + 1,
+                    turn_index=len(turns) + 1,
                     prompt=summary_prompt,
-                    max_output_tokens=max(args.anthropic_max_output_tokens, 1600),
-                    web_search_mode=args.anthropic_web_search,
-                    max_searches=max(3, min(args.anthropic_max_searches, 5)),
-                    fallback_without_web_search=args.fallback_without_web_search,
+                    is_summary=True,
                 )
-                summary_markdown = orch.normalize_response_text(orch.extract_anthropic_text(summary_raw))
-                turns.append(
-                    orch.DebateTurn(
-                        speaker_label=f"{anthropic_label} Summary",
-                        model=summary_raw.get("model", args.anthropic_model),
-                        provider="anthropic",
-                        round_number=args.rounds + 1,
-                        prompt=summary_prompt,
-                        response_text=summary_markdown,
-                        citations=orch.extract_anthropic_citations(summary_raw),
-                        usage=summary_raw.get("usage", {}),
-                        raw_response=summary_raw,
-                    )
+            else:
+                raw_response = orch.call_provider(summarizer, runtime_keys[summarizer.participant_id], summary_prompt)
+                summary_turn = orch.ConversationTurn(
+                    participant_id=summarizer.participant_id,
+                    speaker_label=f"{summarizer.label} Summary",
+                    provider=summarizer.provider,
+                    model=raw_response.get("model", summarizer.model),
+                    round_number=rounds + 1,
+                    turn_index=len(turns) + 1,
+                    prompt=summary_prompt,
+                    response_text=orch.normalize_response_text(orch.extract_response_text(summarizer, raw_response)),
+                    citations=orch.extract_response_citations(summarizer, raw_response),
+                    usage=raw_response.get("usage", {}),
+                    raw_response=raw_response,
+                    is_summary=True,
                 )
-                orch.write_markdown_logs(run_dir, args.question, turns[:-1], summary_markdown, args)
-                orch.write_run_metadata(run_dir, args.question, turns, args)
-                write_web_state(
-                    run_dir,
-                    {
-                        "status": "completed",
-                        "completed_at": iso_now(),
-                        "error": "",
-                    },
-                )
-                return
-
-            raise RuntimeError(f"Unknown step type {step!r}")
+            turns.append(summary_turn)
+            summary_markdown = summary_turn.response_text
+            orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
+            orch.write_run_metadata(run_dir, question, rounds, participants, summarizer_id, turns, dry_run)
+            write_web_state(
+                run_dir,
+                {
+                    "status": "completed",
+                    "completed_at": iso_now(),
+                    "error": "",
+                },
+            )
+            return
     except orch.ApiError as exc:
-        orch.write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-        orch.write_run_metadata(run_dir, args.question, turns, args)
+        orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
+        orch.write_run_metadata(run_dir, question, rounds, participants, summarizer_id, turns, dry_run)
         write_web_state(
             run_dir,
             {
@@ -515,9 +773,9 @@ def execute_conversation(run_dir: Path, args: SimpleNamespace, resume_state: Opt
                 "failed_at": iso_now(),
             },
         )
-    except Exception as exc:  # pragma: no cover - defensive path
-        orch.write_markdown_logs(run_dir, args.question, turns, summary_markdown, args)
-        orch.write_run_metadata(run_dir, args.question, turns, args)
+    except Exception as exc:  # pragma: no cover
+        orch.write_markdown_logs(run_dir, question, participants, summarizer_id, turns, summary_markdown)
+        orch.write_run_metadata(run_dir, question, rounds, participants, summarizer_id, turns, dry_run)
         write_web_state(
             run_dir,
             {
@@ -531,12 +789,12 @@ def execute_conversation(run_dir: Path, args: SimpleNamespace, resume_state: Opt
         clear_active_run(run_id)
 
 
-def start_new_conversation(payload: Dict[str, Any]) -> Dict[str, Any]:
-    question = str(payload.get("question", "")).strip()
+def start_new_conversation(payload: Dict[str, Any], user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    parsed = parse_request_payload(payload, allow_env_fallback=False)
+    question = parsed["question"]
     if not question:
         raise ValueError("Question is required.")
 
-    args = make_runtime_args(question, payload)
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     run_dir = RUNS_ROOT / f"{orch.now_stamp()}-{orch.slugify(question)}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -548,28 +806,77 @@ def start_new_conversation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "created_at": iso_now(),
             "updated_at": iso_now(),
             "error": "",
+            "owner_user_id": user.get("id", "") if user else "",
+            "owner_email": user.get("email", "") if user else "",
         },
     )
-    orch.write_markdown_logs(run_dir, question, [], "", args)
-    orch.write_run_metadata(run_dir, question, [], args)
+    orch.write_markdown_logs(
+        run_dir,
+        question,
+        parsed["participants"],
+        parsed["summarizer_id"],
+        [],
+        "",
+    )
+    orch.write_run_metadata(
+        run_dir,
+        question,
+        parsed["rounds"],
+        parsed["participants"],
+        parsed["summarizer_id"],
+        [],
+        parsed["dry_run"],
+    )
 
-    thread = threading.Thread(target=execute_conversation, args=(run_dir, args), daemon=True)
+    thread = threading.Thread(
+        target=execute_conversation,
+        args=(
+            run_dir,
+            question,
+            parsed["rounds"],
+            parsed["participants"],
+            parsed["summarizer_id"],
+            parsed["runtime_keys"],
+            parsed["dry_run"],
+        ),
+        daemon=True,
+    )
     register_active_run(run_dir.name, thread)
     thread.start()
     return build_conversation_payload(run_dir)
 
 
-def resume_conversation(run_id: str) -> Dict[str, Any]:
+def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     run_dir = RUNS_ROOT / run_id
     if not is_run_dir(run_dir):
         raise FileNotFoundError(f"No conversation found for {run_id}")
+    if not user_can_access_run(run_dir, user):
+        raise PermissionError("You do not have access to that conversation.")
     if is_active_run(run_id):
         return build_conversation_payload(run_dir)
 
     resume_state = orch.load_resume_state(str(run_dir))
-    args = default_resume_args()
-    orch.apply_resume_config(args, resume_state)
-    thread = threading.Thread(target=execute_conversation, args=(run_dir, args, resume_state), daemon=True)
+    participant_payloads = payload.get("participants") or [orch.participant_to_metadata(item) for item in resume_state.participants]
+    runtime_keys = (
+        {}
+        if bool(resume_state.metadata.get("dry_run", False))
+        else orch.extract_runtime_keys(resume_state.participants, participant_payloads, use_env_fallback=False)
+    )
+
+    thread = threading.Thread(
+        target=execute_conversation,
+        args=(
+            run_dir,
+            resume_state.question,
+            resume_state.rounds,
+            resume_state.participants,
+            resume_state.summarizer_id,
+            runtime_keys,
+            bool(resume_state.metadata.get("dry_run", False)),
+            resume_state,
+        ),
+        daemon=True,
+    )
     register_active_run(run_id, thread)
     thread.start()
     write_web_state(run_dir, {"status": "running", "error": ""})
@@ -590,12 +897,114 @@ def file_response_path(path: str) -> Path:
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "DuetLab/1.0"
+    server_version = "Pantheon/1.0"
+
+    def cookies(self) -> SimpleCookie:
+        cookie = SimpleCookie()
+        cookie.load(self.headers.get("Cookie", ""))
+        return cookie
+
+    def current_user(self) -> Optional[Dict[str, Any]]:
+        cookie = self.cookies()
+        token = cookie.get(SESSION_COOKIE_NAME)
+        return user_for_session_token(token.value if token else "")
+
+    def session_cookie_header(self, token: str, expires: bool = False) -> str:
+        if expires:
+            return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        return f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE}"
+
+    def google_state_cookie_header(self, token: str, expires: bool = False) -> str:
+        if expires:
+            return f"{GOOGLE_STATE_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        return f"{GOOGLE_STATE_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={GOOGLE_STATE_MAX_AGE}"
+
+    def redirect(self, location: str, headers: Optional[Dict[str, Any]] = None) -> None:
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        for key, value in (headers or {}).items():
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    self.send_header(key, str(item))
+            else:
+                self.send_header(key, str(value))
+        self.end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self.serve_static_file("index.html")
+            return
+
+        if parsed.path == "/login":
+            self.serve_static_file("login.html")
+            return
+
+        if parsed.path == "/signup":
+            self.serve_static_file("signup.html")
+            return
+
+        if parsed.path == "/account":
+            self.serve_static_file("account.html")
+            return
+
+        if parsed.path == "/privacy":
+            self.serve_static_file("privacy.html")
+            return
+
+        if parsed.path == "/auth/google/start":
+            if not google_auth_enabled():
+                self.redirect("/signup?error=Google+sign-in+is+not+configured+yet.")
+                return
+            state_token = secrets.token_urlsafe(24)
+            self.redirect(
+                google_authorize_url(self, state_token),
+                headers={"Set-Cookie": self.google_state_cookie_header(state_token)},
+            )
+            return
+
+        if parsed.path == "/auth/google/callback":
+            params = parse_qs(parsed.query)
+            if params.get("error"):
+                self.redirect("/signup?error=Google+sign-in+was+cancelled.")
+                return
+            code = str((params.get("code") or [""])[0]).strip()
+            returned_state = str((params.get("state") or [""])[0]).strip()
+            stored_state = self.cookies().get(GOOGLE_STATE_COOKIE_NAME)
+            if not code or not returned_state or not stored_state or stored_state.value != returned_state:
+                self.redirect(
+                    "/signup?error=Google+sign-in+could+not+be+verified.",
+                    headers={"Set-Cookie": self.google_state_cookie_header("", expires=True)},
+                )
+                return
+            try:
+                token_payload = exchange_google_code(self, code)
+                access_token = str(token_payload.get("access_token", "")).strip()
+                if not access_token:
+                    raise ValueError("Google did not return an access token.")
+                profile = fetch_google_profile(access_token)
+                user = upsert_google_user(
+                    str(profile.get("email", "")),
+                    str(profile.get("name", "")),
+                    str(profile.get("picture", "")),
+                )
+                assign_ownerless_runs_to_user(user)
+                token = create_session(user["id"])
+            except Exception:
+                self.redirect(
+                    "/signup?error=Google+sign-in+failed.+Please+try+again.",
+                    headers={"Set-Cookie": self.google_state_cookie_header("", expires=True)},
+                )
+                return
+            self.redirect(
+                "/account",
+                headers={
+                    "Set-Cookie": [
+                        self.session_cookie_header(token),
+                        self.google_state_cookie_header("", expires=True),
+                    ],
+                },
+            )
             return
 
         if parsed.path.startswith("/conversations/"):
@@ -605,20 +1014,23 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
 
         if parsed.path == "/api/models":
-            self.send_json(
-                {
-                    "openai": OPENAI_MODEL_OPTIONS,
-                    "anthropic": ANTHROPIC_MODEL_OPTIONS,
-                    "defaults": {
-                        "openai": orch.DEFAULT_OPENAI_MODEL,
-                        "anthropic": orch.DEFAULT_ANTHROPIC_MODEL,
-                    },
-                }
-            )
+            self.send_json({"providers": provider_catalog(), "maxParticipants": orch.MAX_PARTICIPANTS})
+            return
+
+        if parsed.path == "/api/auth/me":
+            self.send_json({"user": user_payload(self.current_user()), "googleAuthEnabled": google_auth_enabled()})
+            return
+
+        if parsed.path == "/api/account":
+            user = self.current_user()
+            if not user:
+                self.send_json({"error": "You must be logged in."}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            self.send_json({"user": user_payload(user), "stats": user_run_stats(user)})
             return
 
         if parsed.path == "/api/conversations":
-            self.send_json({"conversations": list_conversations()})
+            self.send_json({"conversations": list_conversations(self.current_user())})
             return
 
         if parsed.path.startswith("/api/conversations/"):
@@ -629,26 +1041,93 @@ class AppHandler(BaseHTTPRequestHandler):
                 if not is_run_dir(run_dir):
                     self.send_json({"error": "Conversation not found."}, status=HTTPStatus.NOT_FOUND)
                     return
+                if not user_can_access_run(run_dir, self.current_user()):
+                    self.send_json({"error": "Conversation not found."}, status=HTTPStatus.NOT_FOUND)
+                    return
                 self.send_json(build_conversation_payload(run_dir))
                 return
 
         try:
-            file_path = file_response_path(parsed.path)
+            self.send_static_file(file_response_path(parsed.path))
         except FileNotFoundError:
             self.send_json({"error": "Not found."}, status=HTTPStatus.NOT_FOUND)
-            return
-        self.send_static_file(file_path)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/api/conversations":
+        if parsed.path == "/api/auth/signup":
             try:
                 payload = self.read_json_body()
+                if str(payload.get("company", "")).strip():
+                    raise ValueError("Sign up could not be completed.")
+                password = str(payload.get("password", ""))
+                name = str(payload.get("name", payload.get("full_name", payload.get("fullName", ""))))
+                confirm_password = str(payload.get("confirm_password", payload.get("confirmPassword", "")))
+                if confirm_password and confirm_password != password:
+                    raise ValueError("Passwords do not match.")
+                user = create_user(str(payload.get("email", "")), password, name=name)
+                assign_ownerless_runs_to_user(user)
+                token = create_session(user["id"])
             except json.JSONDecodeError:
                 self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
                 return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({"user": user_payload(user)}, headers={"Set-Cookie": self.session_cookie_header(token)})
+            return
+
+        if parsed.path == "/api/auth/login":
             try:
-                conversation = start_new_conversation(payload)
+                payload = self.read_json_body()
+                user = authenticate_user(str(payload.get("email", "")), str(payload.get("password", "")))
+                assign_ownerless_runs_to_user(user)
+                token = create_session(user["id"])
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({"user": user_payload(user)}, headers={"Set-Cookie": self.session_cookie_header(token)})
+            return
+
+        if parsed.path == "/api/auth/logout":
+            cookie = self.cookies()
+            token = cookie.get(SESSION_COOKIE_NAME)
+            if token:
+                delete_session(token.value)
+            self.send_json({"ok": True}, headers={"Set-Cookie": self.session_cookie_header("", expires=True)})
+            return
+
+        if parsed.path == "/api/account/password":
+            user = self.current_user()
+            if not user:
+                self.send_json({"error": "You must be logged in."}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self.read_json_body()
+                current_password = str(payload.get("current_password", payload.get("currentPassword", "")))
+                new_password = str(payload.get("new_password", payload.get("newPassword", "")))
+                confirm_password = str(payload.get("confirm_password", payload.get("confirmPassword", "")))
+                if new_password != confirm_password:
+                    raise ValueError("New passwords do not match.")
+                change_user_password(user["id"], current_password, new_password)
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({"ok": True})
+            return
+
+        if parsed.path == "/api/conversations":
+            try:
+                payload = self.read_json_body()
+                conversation = start_new_conversation(payload, self.current_user())
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
+                return
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -660,14 +1139,19 @@ class AppHandler(BaseHTTPRequestHandler):
             if len(parts) == 4:
                 run_id = parts[2]
                 try:
-                    self.read_json_body()
+                    payload = self.read_json_body()
+                    conversation = resume_conversation(run_id, payload, self.current_user())
                 except json.JSONDecodeError:
                     self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
                     return
-                try:
-                    conversation = resume_conversation(run_id)
                 except FileNotFoundError:
                     self.send_json({"error": "Conversation not found."}, status=HTTPStatus.NOT_FOUND)
+                    return
+                except PermissionError as exc:
+                    self.send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+                    return
+                except ValueError as exc:
+                    self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
                 self.send_json(conversation)
                 return
@@ -683,11 +1167,22 @@ class AppHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(raw.decode("utf-8"))
 
-    def send_json(self, payload: Dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def send_json(
+        self,
+        payload: Dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        headers: Optional[Dict[str, Any]] = None,
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for key, value in (headers or {}).items():
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    self.send_header(key, str(item))
+            else:
+                self.send_header(key, str(value))
         self.end_headers()
         self.wfile.write(body)
 
@@ -706,7 +1201,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def parse_server_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Duet Lab web interface.")
+    parser = argparse.ArgumentParser(description="Run the Pantheon web interface.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     return parser.parse_args()
@@ -715,8 +1210,9 @@ def parse_server_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_server_args()
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    init_auth_db()
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
-    print(f"Duet Lab running at http://{args.host}:{args.port}")
+    print(f"Pantheon running at http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pantheon Privacy Policy</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-page="privacy">
+    <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
+      <div class="main-shell main-shell-full">
+        <header class="topbar topbar-detail">
+          <a href="/" class="home-button" aria-label="Go to Pantheon home">
+            <img src="/logo.svg" alt="" class="home-button-icon" />
+          </a>
+
+          <div class="topbar-spacer"></div>
+
+          <nav id="top-links" class="top-links">
+            <a href="/login">Log in</a>
+            <a href="/signup">Sign up</a>
+            <a href="/privacy">Privacy Policy</a>
+          </nav>
+        </header>
+
+        <main class="policy-stage">
+          <article class="policy-card">
+            <p class="eyebrow">Privacy Policy</p>
+            <h1>Pantheon Privacy Policy</h1>
+            <p>
+              Pantheon is designed so users can bring their own API keys for ChatGPT, Claude, Gemini, and Grok. We do not
+              intentionally distribute, publish, or sell your API keys.
+            </p>
+
+            <h2>How Pantheon handles API keys</h2>
+            <p>
+              API keys entered in the Pantheon web app are used only to make the requested model calls for your live session.
+              They are kept in browser session storage so you can resume the current run during the same browser session.
+            </p>
+            <p>
+              Pantheon does not write those keys into <code>run.json</code>, <code>transcript.md</code>, or
+              <code>summary.md</code>, and the saved run artifacts are built to exclude API key values.
+            </p>
+
+            <h2>What gets saved</h2>
+            <p>Pantheon saves conversation artifacts such as:</p>
+            <ul>
+              <li>The user prompt</li>
+              <li>The selected providers and models</li>
+              <li>The transcript of model responses</li>
+              <li>The final synthesis</li>
+              <li>Status metadata for resume and debugging</li>
+            </ul>
+
+            <h2>Important note</h2>
+            <p>
+              No local or self-hosted app can promise absolute security. You should still only use Pantheon on machines and
+              servers you trust, protect your browser session, and rotate keys if you believe they were exposed elsewhere.
+            </p>
+
+            <h2>Contact and responsibility</h2>
+            <p>
+              If you deploy or modify Pantheon yourself, you are responsible for your own hosting, logs, infrastructure, and
+              operational security practices.
+            </p>
+          </article>
+        </main>
+      </div>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

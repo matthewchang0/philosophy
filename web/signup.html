@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign Up · Pantheon</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-page="signup">
+    <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
+      <div class="main-shell main-shell-full">
+        <header class="topbar topbar-detail">
+          <a href="/" class="home-button" aria-label="Go to Pantheon home">
+            <img src="/logo.svg" alt="" class="home-button-icon" />
+          </a>
+          <div class="topbar-spacer"></div>
+          <nav id="top-links" class="top-links">
+            <a href="/login">Log in</a>
+            <a href="/privacy">Privacy Policy</a>
+          </nav>
+        </header>
+        <main class="auth-stage">
+          <section class="auth-card">
+            <p class="eyebrow">Account</p>
+            <h1>Create your Pantheon account</h1>
+            <p class="auth-copy">Sign up to keep your saved conversations linked to your login on this deployment.</p>
+            <form id="signup-form" class="auth-form">
+              <input id="signup-company" type="text" class="honeypot-field" tabindex="-1" autocomplete="off" aria-hidden="true" />
+              <label class="field">
+                <span>Name</span>
+                <input id="signup-name" type="text" autocomplete="name" required />
+              </label>
+              <label class="field">
+                <span>Email</span>
+                <input id="signup-email" type="email" autocomplete="email" required />
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input id="signup-password" type="password" autocomplete="new-password" required />
+              </label>
+              <label class="field">
+                <span>Confirm password</span>
+                <input id="signup-confirm-password" type="password" autocomplete="new-password" required />
+              </label>
+              <label class="checkbox-field">
+                <input id="signup-terms" type="checkbox" required />
+                <span>I agree to use Pantheon responsibly on this deployment.</span>
+              </label>
+              <div id="signup-error" class="error-banner hidden"></div>
+              <button id="signup-submit" class="primary-button primary-button-large" type="submit">Sign up</button>
+            </form>
+            <div class="auth-alt">
+              <div class="auth-divider"><span>or</span></div>
+              <a id="google-signup-button" class="google-auth-button" href="/auth/google/start">
+                <img src="/providers/google.svg" alt="" class="google-auth-icon" />
+                <span>Continue with Google</span>
+              </a>
+            </div>
+            <p class="auth-footer">Already have an account? <a href="/login">Log in</a></p>
+          </section>
+        </main>
+      </div>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

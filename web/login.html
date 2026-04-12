@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Log In · Pantheon</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-page="login">
+    <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
+      <div class="main-shell main-shell-full">
+        <header class="topbar topbar-detail">
+          <a href="/" class="home-button" aria-label="Go to Pantheon home">
+            <img src="/logo.svg" alt="" class="home-button-icon" />
+          </a>
+          <div class="topbar-spacer"></div>
+          <nav id="top-links" class="top-links">
+            <a href="/signup">Sign up</a>
+            <a href="/privacy">Privacy Policy</a>
+          </nav>
+        </header>
+        <main class="auth-stage">
+          <section class="auth-card">
+            <p class="eyebrow">Account</p>
+            <h1>Log in to Pantheon</h1>
+            <p class="auth-copy">Use your account to keep your saved runs tied to you on this server.</p>
+            <form id="login-form" class="auth-form">
+              <label class="field">
+                <span>Email</span>
+                <input id="login-email" type="email" autocomplete="email" required />
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input id="login-password" type="password" autocomplete="current-password" required />
+              </label>
+              <div id="login-error" class="error-banner hidden"></div>
+              <button id="login-submit" class="primary-button primary-button-large" type="submit">Log in</button>
+            </form>
+            <div class="auth-alt">
+              <div class="auth-divider"><span>or</span></div>
+              <a id="google-login-button" class="google-auth-button" href="/auth/google/start">
+                <img src="/providers/google.svg" alt="" class="google-auth-icon" />
+                <span>Continue with Google</span>
+              </a>
+            </div>
+            <p class="auth-footer">Need an account? <a href="/signup">Sign up</a></p>
+          </section>
+        </main>
+      </div>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

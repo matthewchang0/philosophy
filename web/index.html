@@ -3,111 +3,171 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Duet Lab</title>
+    <title>Pantheon</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body data-page="home">
-    <div class="site-frame">
-      <header class="topbar">
-        <button id="menu-toggle" class="menu-button" type="button" aria-expanded="false" aria-controls="history-drawer">
-          <span class="menu-icon" aria-hidden="true"></span>
-          <span>Previous Messages</span>
-        </button>
-      </header>
-
-      <aside id="history-drawer" class="history-drawer" aria-hidden="true">
-        <div class="drawer-header">
-          <p class="eyebrow">History</p>
-          <div class="drawer-title-row">
-            <h2>Previous Messages</h2>
-            <button id="drawer-close" class="icon-button" type="button" aria-label="Close menu">×</button>
-          </div>
-          <p class="drawer-copy">Jump into any earlier duet from here.</p>
-        </div>
-
-        <div class="sidebar-label-row">
-          <span class="sidebar-title">Saved Runs</span>
+    <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
+      <aside id="history-drawer" class="history-drawer" aria-hidden="false">
+        <div class="drawer-head drawer-head-simple drawer-head-compact">
+          <strong class="drawer-title">Conversations</strong>
           <span id="conversation-count" class="count-pill">0</span>
         </div>
+
         <nav id="conversation-list" class="conversation-list"></nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div id="sidebar-account-slot" class="sidebar-footer sidebar-footer-minimal"></div>
       </aside>
 
       <div id="drawer-scrim" class="drawer-scrim hidden"></div>
 
-      <main class="landing-stage">
-        <section class="landing-hero">
-          <img src="/logo.svg" alt="Duet Lab logo" class="hero-logo" />
-          <p class="eyebrow">Playful Multi-Model Studio</p>
-          <h1 class="hero-title">Duet Lab</h1>
-          <p class="hero-copy">
-            Ask one question. Let OpenAI and Anthropic think out loud together. Watch the turns unfold, then let Claude
-            wrap it up with a verdict, agreements, disagreements, and a conclusion.
-          </p>
-        </section>
+      <div class="main-shell">
+        <header class="topbar topbar-home">
+          <button id="menu-toggle" class="menu-button shell-toggle" type="button" aria-expanded="false" aria-controls="history-drawer">
+            <span class="menu-icon" aria-hidden="true"></span>
+            <span class="menu-label">Menu</span>
+          </button>
 
-        <section class="composer-card">
-          <div class="composer-header">
-            <div>
-              <p class="eyebrow">Start A New Duet</p>
-              <h2>What should they collaborate on?</h2>
+          <div class="topbar-spacer"></div>
+
+          <nav id="top-links" class="top-links">
+            <a href="/login">Log in</a>
+            <a href="/signup">Sign up</a>
+            <a href="/privacy">Privacy Policy</a>
+          </nav>
+        </header>
+
+        <main class="arena-landing">
+          <section class="headline-stage">
+            <img src="/logo.svg" alt="Pantheon logo" class="hero-logo" />
+            <h1 class="arena-title">Pantheon</h1>
+            <p class="arena-byline">Multiple frontier models, one conversation.</p>
+            <h2 class="arena-question">What are you creating today?</h2>
+            <div class="category-strip">
+              <span>Website</span>
+              <span>Product</span>
+              <span>Research</span>
+              <span>Code</span>
+              <span>Writing</span>
+              <span>Strategy</span>
+              <span>UI Component</span>
+              <span>Data Visualization</span>
             </div>
-            <div class="sparkle-badge">Two models, one shared thread</div>
-          </div>
+          </section>
 
-          <form id="request-form" class="request-form">
-            <label class="field request-field">
-              <span>Your request</span>
-              <textarea
-                id="question-input"
-                name="question"
-                rows="5"
-                placeholder="Ask for philosophy, code, research, architecture, writing, planning, or anything else they can tackle together."
-                required
-              ></textarea>
-            </label>
+          <section class="composer-stage">
+            <form id="request-form" class="request-form request-form-centered">
+              <label class="prompt-frame" for="question-input">
+                <textarea
+                  id="question-input"
+                  rows="4"
+                  placeholder="Ask a question, propose a project, or paste a task for ChatGPT, Claude, Gemini, and Grok to explore together."
+                  required
+                ></textarea>
+              </label>
 
-            <div class="form-grid">
-              <label class="field">
-                <span>OpenAI model</span>
-                <select id="openai-model" name="openai_model"></select>
-              </label>
-              <label class="field">
-                <span>Anthropic model</span>
-                <select id="anthropic-model" name="anthropic_model"></select>
-              </label>
-              <label class="field">
-                <span>Rounds</span>
-                <input id="rounds-input" name="rounds" type="number" min="1" max="12" value="6" />
-              </label>
-              <label class="field">
-                <span>Anthropic web search</span>
-                <select id="anthropic-web-search" name="anthropic_web_search">
-                  <option value="basic">basic</option>
-                  <option value="off">off</option>
-                  <option value="dynamic">dynamic</option>
-                </select>
-              </label>
-            </div>
+              <div class="controls-row">
+                <label class="field compact slim">
+                  <span>Rounds</span>
+                  <input id="rounds-input" type="number" min="1" max="12" value="3" />
+                </label>
 
-            <label class="toggle-field" for="dry-run-input">
-              <div class="toggle-copy">
-                <span>Dry run</span>
-                <p>Test the orchestration flow without calling either API.</p>
+                <label class="field compact slim toggle-field" for="dry-run-input">
+                  <span>Dry run</span>
+                  <input id="dry-run-input" class="switch-input" type="checkbox" />
+                  <span class="switch-ui" aria-hidden="true"></span>
+                </label>
+
+                <label class="field compact slim">
+                  <span>Final summary written by</span>
+                  <select id="summarizer-select"></select>
+                </label>
               </div>
-              <input id="dry-run-input" name="dry_run" type="checkbox" />
-            </label>
 
-            <div class="form-actions">
-              <button id="submit-button" class="primary-button" type="submit">Launch duet</button>
-              <p class="helper-copy">
-                The conversation is saved to disk while it runs, so interruptions can be resumed.
-              </p>
-            </div>
-          </form>
-        </section>
-      </main>
+              <section class="picker-stage">
+                <div class="picker-header">
+                  <div>
+                    <p class="eyebrow">Available Models</p>
+                    <h3>Choose up to five participants</h3>
+                  </div>
+                </div>
+                <div id="provider-picker" class="provider-picker"></div>
+              </section>
+
+              <section class="roster-stage">
+                <div class="picker-header">
+                  <div>
+                    <p class="eyebrow">Selected Models</p>
+                    <h3>Your lineup</h3>
+                  </div>
+                  <span class="subtle-note">Add duplicates if you want multiple models from the same family.</span>
+                </div>
+                <div id="participants-list" class="participants-list"></div>
+              </section>
+
+              <div class="form-actions form-actions-centered">
+                <button id="submit-button" class="primary-button primary-button-large" type="submit">Start conversation</button>
+                <p class="helper-copy helper-centered">
+                  API keys stay in your current browser session and are not written into the saved run artifacts.
+                </p>
+              </div>
+            </form>
+          </section>
+        </main>
+      </div>
     </div>
+
+    <template id="participant-template">
+      <article class="participant-card participant-card-inline">
+        <div class="participant-card-head">
+          <div class="participant-heading-wrap">
+            <div class="provider-badge-icon"></div>
+            <div>
+              <p class="participant-kicker">Selected model</p>
+              <h4 class="participant-name">Model</h4>
+            </div>
+          </div>
+          <button class="remove-participant icon-button" type="button" aria-label="Remove participant">×</button>
+        </div>
+
+        <div class="participant-grid participant-grid-tight">
+          <label class="field compact">
+            <span>Family</span>
+            <div class="participant-provider-readonly"></div>
+          </label>
+
+          <label class="field compact">
+            <span>Model</span>
+            <select class="participant-model-select"></select>
+          </label>
+
+          <label class="field compact">
+            <span>API key</span>
+            <input class="participant-api-key" type="password" placeholder="Paste your API key" autocomplete="off" />
+          </label>
+
+          <label class="field compact">
+            <span>Max output tokens</span>
+            <input class="participant-max-tokens" type="number" min="256" max="12000" value="1600" />
+          </label>
+
+          <label class="field compact participant-reasoning-wrap">
+            <span>Reasoning</span>
+            <select class="participant-reasoning">
+              <option value="none">none</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </label>
+        </div>
+      </article>
+    </template>
 
     <script src="/app.js" defer></script>
   </body>
