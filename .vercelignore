@@ -1,0 +1,6 @@
+.env
+pantheon_auth.db
+runs
+__pycache__
+.git
+.DS_Store

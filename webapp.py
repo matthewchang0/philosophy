@@ -26,9 +26,11 @@ import orchestrator as orch
 
 APP_ROOT = Path(__file__).resolve().parent
 WEB_ROOT = APP_ROOT / "web"
-RUNS_ROOT = APP_ROOT / orch.DEFAULT_OUTPUT_DIR
+IS_VERCEL = bool(os.environ.get("VERCEL"))
+DATA_ROOT = Path(os.environ.get("PANTHEON_DATA_DIR", "/tmp/pantheon" if IS_VERCEL else str(APP_ROOT)))
+RUNS_ROOT = DATA_ROOT / orch.DEFAULT_OUTPUT_DIR
 WEB_STATE_FILENAME = "web_state.json"
-AUTH_DB_PATH = APP_ROOT / "pantheon_auth.db"
+AUTH_DB_PATH = DATA_ROOT / "pantheon_auth.db"
 SESSION_COOKIE_NAME = "pantheon_session"
 GOOGLE_STATE_COOKIE_NAME = "pantheon_google_state"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30
@@ -63,6 +65,7 @@ def write_web_state(run_dir: Path, patch: Dict[str, Any]) -> Dict[str, Any]:
     current = read_web_state(run_dir)
     current.update(patch)
     current["updated_at"] = iso_now()
+    run_dir.mkdir(parents=True, exist_ok=True)
     web_state_path(run_dir).write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
     return current
 
@@ -91,7 +94,12 @@ def clear_active_run(run_id: str) -> None:
         ACTIVE_RUNS.pop(run_id, None)
 
 
+def should_run_inline() -> bool:
+    return IS_VERCEL
+
+
 def auth_db() -> sqlite3.Connection:
+    AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(AUTH_DB_PATH)
     connection.row_factory = sqlite3.Row
     return connection
@@ -828,6 +836,18 @@ def start_new_conversation(payload: Dict[str, Any], user: Optional[Dict[str, Any
         parsed["dry_run"],
     )
 
+    if should_run_inline():
+        execute_conversation(
+            run_dir,
+            question,
+            parsed["rounds"],
+            parsed["participants"],
+            parsed["summarizer_id"],
+            parsed["runtime_keys"],
+            parsed["dry_run"],
+        )
+        return build_conversation_payload(run_dir)
+
     thread = threading.Thread(
         target=execute_conversation,
         args=(
@@ -862,6 +882,20 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
         if bool(resume_state.metadata.get("dry_run", False))
         else orch.extract_runtime_keys(resume_state.participants, participant_payloads, use_env_fallback=False)
     )
+
+    if should_run_inline():
+        write_web_state(run_dir, {"status": "running", "error": ""})
+        execute_conversation(
+            run_dir,
+            resume_state.question,
+            resume_state.rounds,
+            resume_state.participants,
+            resume_state.summarizer_id,
+            runtime_keys,
+            bool(resume_state.metadata.get("dry_run", False)),
+            resume_state,
+        )
+        return build_conversation_payload(run_dir)
 
     thread = threading.Thread(
         target=execute_conversation,
