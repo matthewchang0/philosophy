@@ -9,6 +9,7 @@ import mimetypes
 import os
 import secrets
 import sqlite3
+import ssl
 import threading
 import traceback
 from datetime import datetime
@@ -19,9 +20,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import orchestrator as orch
+
+try:
+    import certifi
+except Exception:  # pragma: no cover - optional dependency fallback
+    certifi = None
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -552,6 +559,12 @@ def google_auth_enabled() -> bool:
     return bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"))
 
 
+def verified_ssl_context() -> ssl.SSLContext:
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
+
+
 def app_base_url(handler: "AppHandler") -> str:
     configured = str(os.environ.get("PANTHEON_BASE_URL", "")).strip().rstrip("/")
     if configured:
@@ -602,8 +615,11 @@ def exchange_google_code(handler: "AppHandler", code: str) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=20, context=verified_ssl_context()) as response:
             return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google token exchange failed: HTTP {exc.code} {body}") from exc
     except Exception as exc:
         raise RuntimeError(f"Google token exchange failed: {exc}") from exc
 
@@ -614,8 +630,11 @@ def fetch_google_profile(access_token: str) -> Dict[str, Any]:
         headers={"Authorization": f"Bearer {access_token}"},
     )
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=20, context=verified_ssl_context()) as response:
             return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google profile request failed: HTTP {exc.code} {body}") from exc
     except Exception as exc:
         raise RuntimeError(f"Google profile request failed: {exc}") from exc
 
@@ -1038,14 +1057,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 assign_ownerless_runs_to_user(user)
                 token = create_session(user["id"])
-            except Exception:
+            except Exception as exc:
+                message = str(exc).strip() or "Google sign-in failed."
                 self.redirect(
-                    "/signup?error=Google+sign-in+failed.+Please+try+again.",
+                    f"/signup?error={urlencode({'message': message})[8:]}",
                     headers={"Set-Cookie": self.google_state_cookie_header("", expires=True)},
                 )
                 return
             self.redirect(
-                "/account",
+                "/account?success=You%27ve+successfully+logged+in.",
                 headers={
                     "Set-Cookie": [
                         self.session_cookie_header(token),

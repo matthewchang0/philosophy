@@ -1,4 +1,5 @@
 const SIDEBAR_STORAGE_KEY = "pantheon:sidebar-collapsed";
+const FLASH_STORAGE_KEY = "pantheon:flash-message";
 
 const state = {
   page: document.body.dataset.page || "home",
@@ -12,6 +13,7 @@ const state = {
   participantCounter: 0,
   pollHandle: null,
   sidebarCollapsed: true,
+  flashTimeout: null,
 };
 
 const els = {
@@ -95,6 +97,61 @@ function avatarMarkup(user) {
   }
   const initial = escapeHtml(name.slice(0, 1).toUpperCase() || "P");
   return `<div class="account-avatar">${initial}</div>`;
+}
+
+function storeFlashMessage(message) {
+  sessionStorage.setItem(FLASH_STORAGE_KEY, JSON.stringify({ message }));
+}
+
+function consumeFlashMessage() {
+  const params = new URLSearchParams(window.location.search);
+  const queryMessage = params.get("success");
+  if (queryMessage) {
+    params.delete("success");
+    const nextQuery = params.toString();
+    const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash || ""}`;
+    window.history.replaceState({}, "", nextUrl);
+    return queryMessage;
+  }
+
+  const raw = sessionStorage.getItem(FLASH_STORAGE_KEY);
+  if (!raw) {
+    return "";
+  }
+  sessionStorage.removeItem(FLASH_STORAGE_KEY);
+  try {
+    return JSON.parse(raw)?.message || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function showSuccessToast(message) {
+  if (!message) {
+    return;
+  }
+  let toast = document.getElementById("app-flash-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "app-flash-toast";
+    toast.className = "flash-toast";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.classList.add("visible");
+  toast.classList.remove("fading");
+  if (state.flashTimeout) {
+    window.clearTimeout(state.flashTimeout);
+  }
+  state.flashTimeout = window.setTimeout(() => {
+    toast.classList.add("fading");
+    toast.classList.remove("visible");
+    window.setTimeout(() => {
+      toast?.remove();
+    }, 500);
+  }, 5000);
 }
 
 function escapeHtml(value) {
@@ -999,6 +1056,7 @@ async function handleLogin(event) {
         password: els.loginPassword?.value || "",
       }),
     });
+    storeFlashMessage("You've successfully logged in.");
     window.location.assign("/account");
   } catch (error) {
     showFormError(els.loginError, error.message);
@@ -1036,6 +1094,7 @@ async function handleSignup(event) {
         company: els.signupCompany?.value || "",
       }),
     });
+    storeFlashMessage("You've successfully signed up.");
     window.location.assign("/account");
   } catch (error) {
     showFormError(els.signupError, error.message);
@@ -1178,6 +1237,7 @@ function bootAccountPage() {
 async function boot() {
   bindShell();
   await loadCurrentUser();
+  showSuccessToast(consumeFlashMessage());
   if (els.conversationList) {
     await loadConversationList();
   }

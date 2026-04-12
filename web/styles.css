@@ -53,6 +53,37 @@ textarea {
   display: none !important;
 }
 
+.flash-toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  z-index: 120;
+  min-width: min(420px, calc(100vw - 32px));
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 14px 18px;
+  border: 1px solid rgba(35, 115, 66, 0.22);
+  border-radius: 18px;
+  background: linear-gradient(180deg, #3ba264 0%, #2e8a54 100%);
+  color: #ffffff;
+  font-size: 0.96rem;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 0 20px 48px rgba(31, 92, 55, 0.22);
+  transform: translate(-50%, -14px);
+  opacity: 0;
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+
+.flash-toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.flash-toast.fading {
+  opacity: 0;
+  transform: translate(-50%, -12px);
+}
+
 .app-shell {
   min-height: 100vh;
   padding: 16px;
