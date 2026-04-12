@@ -8,13 +8,23 @@ const state = {
   conversations: [],
   providers: [],
   user: null,
+  billing: null,
+  quote: null,
   googleAuthEnabled: false,
   maxParticipants: 5,
   participantCounter: 0,
   pollHandle: null,
   sidebarCollapsed: true,
   flashTimeout: null,
+  quoteHandle: null,
 };
+
+if (window.__PANTHEON_INITIAL_USER__) {
+  state.user = window.__PANTHEON_INITIAL_USER__;
+}
+if (window.__PANTHEON_INITIAL_BILLING__) {
+  state.billing = window.__PANTHEON_INITIAL_BILLING__;
+}
 
 const els = {
   appLayout: document.getElementById("app-layout"),
@@ -32,6 +42,9 @@ const els = {
   roundsInput: document.getElementById("rounds-input"),
   dryRunInput: document.getElementById("dry-run-input"),
   submitButton: document.getElementById("submit-button"),
+  billingBalance: document.getElementById("billing-balance"),
+  quoteEstimate: document.getElementById("quote-estimate"),
+  billingMessage: document.getElementById("billing-message"),
   providerPicker: document.getElementById("provider-picker"),
   participantsList: document.getElementById("participants-list"),
   participantTemplate: document.getElementById("participant-template"),
@@ -70,6 +83,9 @@ const els = {
   confirmPassword: document.getElementById("confirm-password"),
   passwordError: document.getElementById("password-error"),
   passwordSubmit: document.getElementById("password-submit"),
+  pricingSummary: document.getElementById("pricing-summary"),
+  pricingGrid: document.getElementById("pricing-grid"),
+  pricingFeedback: document.getElementById("pricing-feedback"),
 };
 
 function displayNameForUser(user) {
@@ -261,6 +277,26 @@ function fullTimeLabel(value) {
   });
 }
 
+function formatCredits(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function formatCents(value) {
+  return new Intl.NumberFormat([], {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format(Number(value || 0) / 100);
+}
+
+function formatMicroUsd(value) {
+  return new Intl.NumberFormat([], {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 4,
+  }).format(Number(value || 0) / 1_000_000);
+}
+
 function conversationUrl(id) {
   return `/conversations/${encodeURIComponent(id)}`;
 }
@@ -422,17 +458,23 @@ function renderTopLinks() {
       links.push(`<a href="/">Home</a>`);
     }
     links.push(`<a href="/account">Account</a>`);
+    links.push(`<a href="/pricing">Pricing</a>`);
     links.push(`<a href="/privacy">Privacy Policy</a>`);
     links.push(`<button class="top-link-button" type="button" data-action="logout">Log out</button>`);
   } else if (state.page === "login") {
+    links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
+    links.push(`<a href="/pricing">Pricing</a>`);
     links.push(`<a href="/privacy">Privacy Policy</a>`);
   } else if (state.page === "signup") {
     links.push(`<a href="/login">Log in</a>`);
+    links.push(`<a href="/signup">Sign up</a>`);
+    links.push(`<a href="/pricing">Pricing</a>`);
     links.push(`<a href="/privacy">Privacy Policy</a>`);
   } else {
     links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
+    links.push(`<a href="/pricing">Pricing</a>`);
     links.push(`<a href="/privacy">Privacy Policy</a>`);
   }
 
@@ -520,6 +562,224 @@ async function loadAccountDetails() {
   return fetchJson("/api/account");
 }
 
+async function loadBilling() {
+  const data = await fetchJson("/api/billing");
+  state.billing = data;
+  return data;
+}
+
+function activeAccount() {
+  return state.billing?.account || null;
+}
+
+function canAttemptConversation() {
+  const account = activeAccount();
+  if (!state.user || !account) {
+    return { allowed: false, message: "Log in and subscribe before running Pantheon." };
+  }
+  if (account.status !== "active" || account.subscriptionStatus !== "active") {
+    return { allowed: false, message: "An active paid subscription is required before you can run Pantheon." };
+  }
+  return { allowed: true, message: "" };
+}
+
+function renderHomeBilling() {
+  if (!els.billingBalance || !els.quoteEstimate || !els.billingMessage) {
+    return;
+  }
+  if (els.dryRunInput) {
+    const enabled = Boolean(state.billing?.dryRunEnabled);
+    els.dryRunInput.disabled = !enabled;
+    if (!enabled) {
+      els.dryRunInput.checked = false;
+    }
+  }
+  const account = activeAccount();
+  if (!state.user || !account) {
+    els.billingBalance.textContent = "Paid subscription required";
+    els.quoteEstimate.textContent = "Estimated cost will appear after you log in.";
+    els.billingMessage.textContent = "Pantheon does not allow unpaid runs.";
+    if (els.submitButton) {
+      els.submitButton.disabled = true;
+    }
+    return;
+  }
+
+  const planName = account.pricingPlanName || "No active plan";
+  els.billingBalance.textContent = `${formatCredits(account.credits)} credits · ${planName}`;
+  if (state.quote) {
+    els.quoteEstimate.textContent = `${formatCredits(state.quote.requiredCredits)} credits reserved upfront · max ${formatMicroUsd(state.quote.maxCostMicroUsd)}`;
+  } else {
+    els.quoteEstimate.textContent = "Estimated cost will appear here.";
+  }
+
+  const messages = [];
+  if (account.status !== "active" || account.subscriptionStatus !== "active") {
+    messages.push("Choose a paid plan before starting a conversation.");
+  } else if (state.quote && !state.quote.sufficientCredits) {
+    messages.push("This request needs more prepaid credits than your current balance.");
+  } else if ((state.billing?.messages || []).length) {
+    messages.push(state.billing.messages[0]);
+  }
+  els.billingMessage.textContent = messages.join(" ");
+
+  if (els.submitButton) {
+    const accountGate = canAttemptConversation();
+    els.submitButton.disabled = !accountGate.allowed || Boolean(state.quote && !state.quote.sufficientCredits);
+  }
+}
+
+function clearQuote() {
+  state.quote = null;
+  renderHomeBilling();
+}
+
+async function refreshQuote() {
+  if (state.page !== "home" || !els.requestForm) {
+    return;
+  }
+  const payload = collectHomePayload();
+  if (!state.user) {
+    clearQuote();
+    return;
+  }
+  if (!payload.question || !payload.participants.length) {
+    clearQuote();
+    return;
+  }
+  try {
+    const quote = await fetchJson("/api/billing/quote", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.quote = quote;
+  } catch (error) {
+    state.quote = null;
+    if (els.billingMessage) {
+      els.billingMessage.textContent = error.message;
+    }
+  }
+  renderHomeBilling();
+}
+
+function scheduleQuoteRefresh() {
+  if (state.quoteHandle) {
+    window.clearTimeout(state.quoteHandle);
+  }
+  state.quoteHandle = window.setTimeout(() => {
+    refreshQuote().catch((error) => console.error(error));
+  }, 250);
+}
+
+function renderPricingPage() {
+  if (!els.pricingGrid || !els.pricingSummary) {
+    return;
+  }
+  const billingState = state.billing;
+  const account = billingState?.account || null;
+  const canManageBilling = Boolean(account?.stripeCustomerId);
+  const summaryBits = [];
+  if (account) {
+    summaryBits.push(`<div class="pricing-summary-chip"><strong>${escapeHtml(formatCredits(account.credits))}</strong><span>credits available</span></div>`);
+    summaryBits.push(`<div class="pricing-summary-chip"><strong>${escapeHtml(account.pricingPlanName || "No active plan")}</strong><span>current plan</span></div>`);
+    summaryBits.push(`<div class="pricing-summary-chip"><strong>${escapeHtml(account.subscriptionStatus || "inactive")}</strong><span>subscription status</span></div>`);
+  } else {
+    summaryBits.push(`<div class="pricing-summary-chip"><strong>Login required</strong><span>Create an account to subscribe</span></div>`);
+  }
+  if (billingState?.stripeCheckoutReady) {
+    summaryBits.push(
+      `<div class="pricing-summary-chip"><strong>${escapeHtml(
+        billingState?.stripeWebhookReady ? "Stripe is ready" : "Stripe is almost ready",
+      )}</strong><span>${escapeHtml(
+        billingState?.stripeWebhookReady
+          ? "Checkout and webhook verification are active"
+          : "Add the Stripe webhook signing secret to activate purchases",
+      )}</span></div>`,
+    );
+  } else {
+    summaryBits.push(`<div class="pricing-summary-chip"><strong>Stripe checkout pending</strong><span>Add the Stripe secret key to enable purchases</span></div>`);
+  }
+  if (canManageBilling) {
+    summaryBits.push(`<button class="secondary-button secondary-button-inline" type="button" data-action="billing-portal">Manage billing</button>`);
+  }
+  els.pricingSummary.innerHTML = summaryBits.join("");
+  els.pricingSummary.querySelector('[data-action="billing-portal"]')?.addEventListener("click", openBillingPortal);
+
+  const plans = billingState?.plans || [];
+  els.pricingGrid.innerHTML = plans
+    .map((plan) => {
+      const checkoutReady = Boolean(billingState?.stripeCheckoutReady && billingState?.stripeWebhookReady);
+      const buttonLabel = !state.user
+        ? "Log in to purchase"
+        : !checkoutReady
+          ? "Complete Stripe setup"
+          : (plan.planType === "subscription" ? "Start subscription" : "Buy credits");
+      const modelAccess = (plan.modelAccess || [])
+        .map((item) => item.split(":")[1] || item)
+        .join(" · ");
+      const buttonDisabled = !state.user || !plan.stripePriceConfigured || !checkoutReady;
+      return `
+        <article class="pricing-tile ${plan.planType}">
+          <p class="eyebrow">${escapeHtml(plan.planType === "subscription" ? "Subscription" : "Credit pack")}</p>
+          <h2>${escapeHtml(plan.name)}</h2>
+          <p class="pricing-price">${escapeHtml(formatCents(plan.monthlyPriceCents))}</p>
+          <p class="pricing-copy">${escapeHtml(plan.description || "")}</p>
+          <div class="pricing-meta">
+            <span>${escapeHtml(formatCredits(plan.includedCredits))} credits</span>
+            ${modelAccess ? `<span>${escapeHtml(modelAccess)}</span>` : `<span>Works with your active subscription</span>`}
+          </div>
+          <button class="primary-button" type="button" data-plan-id="${escapeHtml(plan.id)}" ${buttonDisabled ? "disabled" : ""}>
+            ${escapeHtml(plan.stripePriceConfigured ? buttonLabel : "Stripe setup missing")}
+          </button>
+        </article>
+      `;
+    })
+    .join("");
+  els.pricingGrid.querySelectorAll("[data-plan-id]").forEach((button) => {
+    button.addEventListener("click", () => startCheckout(button.dataset.planId));
+  });
+}
+
+function showPricingFeedback(message, isError = true) {
+  if (!els.pricingFeedback) {
+    return;
+  }
+  if (!message) {
+    els.pricingFeedback.classList.add("hidden");
+    els.pricingFeedback.textContent = "";
+    return;
+  }
+  els.pricingFeedback.classList.remove("hidden");
+  els.pricingFeedback.textContent = message;
+  els.pricingFeedback.classList.toggle("success-banner", !isError);
+}
+
+async function startCheckout(planId) {
+  showPricingFeedback("");
+  try {
+    const result = await fetchJson("/api/billing/checkout", {
+      method: "POST",
+      body: JSON.stringify({ planId }),
+    });
+    window.location.assign(result.url);
+  } catch (error) {
+    showPricingFeedback(error.message, true);
+  }
+}
+
+async function openBillingPortal() {
+  showPricingFeedback("");
+  try {
+    const result = await fetchJson("/api/billing/portal", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    window.location.assign(result.url);
+  } catch (error) {
+    showPricingFeedback(error.message, true);
+  }
+}
+
 function participantDisplayLabel(node) {
   const providerId = node.dataset.providerId;
   const model = node.querySelector(".participant-model-select")?.value || "";
@@ -549,6 +809,7 @@ function removeParticipantCard(node) {
   node.remove();
   updateSummarizerOptions();
   renderProviderPicker();
+  scheduleQuoteRefresh();
 }
 
 function renderProviderPicker() {
@@ -558,13 +819,21 @@ function renderProviderPicker() {
   const selectedCount = participantNodes().length;
   const disabled = selectedCount >= state.maxParticipants;
   els.providerPicker.innerHTML = state.providers
-    .map((provider) => `
-      <button class="provider-tile ${provider.id}" type="button" data-provider-id="${escapeHtml(provider.id)}" ${disabled ? "disabled" : ""}>
+    .map((provider) => {
+      const providerDisabled = disabled;
+      const availabilityNote = (provider.models || []).every((model) => !model.available)
+        ? "Needs server API key"
+        : !(provider.models || []).some((model) => model.allowed)
+          ? "Upgrade plan to use"
+          : (provider.suggestedModels || []).join(" · ");
+      return `
+      <button class="provider-tile ${provider.id}" type="button" data-provider-id="${escapeHtml(provider.id)}" ${providerDisabled ? "disabled" : ""}>
         ${providerIcon(provider.id, "provider-icon provider-icon-large")}
         <strong>${escapeHtml(provider.label)}</strong>
-        <span>${escapeHtml((provider.suggestedModels || []).join(" · "))}</span>
+        <span>${escapeHtml(availabilityNote)}</span>
       </button>
-    `)
+    `;
+    })
     .join("");
 
   els.providerPicker.querySelectorAll("[data-provider-id]").forEach((button) => {
@@ -586,11 +855,16 @@ function bindParticipantCard(node) {
 
   badge.innerHTML = providerIcon(providerId, "provider-icon provider-icon-small");
   readonlyProvider.innerHTML = `<span class="provider-inline-badge ${providerId}">${escapeHtml(provider.label)}</span>`;
-  modelSelect.innerHTML = (provider?.suggestedModels || [])
-    .map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`)
+  const modelOptions = provider?.models || [];
+  modelSelect.innerHTML = modelOptions
+    .map((item) => {
+      const suffix = !item.available ? " (needs server API key)" : !item.allowed ? " (plan upgrade required)" : "";
+      return `<option value="${escapeHtml(item.id)}">${escapeHtml(item.id + suffix)}</option>`;
+    })
     .join("");
+  const firstAllowedModel = modelOptions.find((item) => item.allowed)?.id || provider?.defaultModel || "";
   if (!modelSelect.value) {
-    modelSelect.value = provider?.defaultModel || "";
+    modelSelect.value = firstAllowedModel;
   }
   if (!tokensInput.value) {
     tokensInput.value = String(provider?.defaultMaxOutputTokens || 1600);
@@ -605,9 +879,12 @@ function bindParticipantCard(node) {
   function refreshLabel() {
     nameHeading.textContent = participantDisplayLabel(node);
     updateSummarizerOptions();
+    scheduleQuoteRefresh();
   }
 
   modelSelect.addEventListener("change", refreshLabel);
+  tokensInput.addEventListener("input", scheduleQuoteRefresh);
+  reasoningSelect.addEventListener("change", scheduleQuoteRefresh);
   removeButton.addEventListener("click", () => removeParticipantCard(node));
   refreshLabel();
 }
@@ -633,7 +910,6 @@ function addParticipantCard(initial = {}) {
   const provider = getProviderCatalog(providerId);
   const modelSelect = node.querySelector(".participant-model-select");
   const tokensInput = node.querySelector(".participant-max-tokens");
-  const apiKeyInput = node.querySelector(".participant-api-key");
   const reasoningSelect = node.querySelector(".participant-reasoning");
 
   if (initial.model && (provider?.suggestedModels || []).includes(initial.model)) {
@@ -644,15 +920,13 @@ function addParticipantCard(initial = {}) {
   } else {
     tokensInput.value = String(provider?.defaultMaxOutputTokens || 1600);
   }
-  if (initial.apiKey) {
-    apiKeyInput.value = initial.apiKey;
-  }
   if (initial.reasoning) {
     reasoningSelect.value = initial.reasoning;
   }
   node.querySelector(".participant-name").textContent = participantDisplayLabel(node);
   updateSummarizerOptions();
   renderProviderPicker();
+  scheduleQuoteRefresh();
 }
 
 function defaultParticipants() {
@@ -686,7 +960,6 @@ function collectHomePayload() {
       model,
       max_output_tokens: Number(node.querySelector(".participant-max-tokens")?.value || 1600),
       reasoning: node.querySelector(".participant-reasoning")?.value || "none",
-      api_key: node.querySelector(".participant-api-key")?.value.trim() || "",
     };
   });
 
@@ -701,38 +974,15 @@ function collectHomePayload() {
   };
 }
 
-function storeRunKeys(runId, participants) {
-  const securePayload = participants.map((participant) => ({
-    participant_id: participant.participant_id,
-    api_key: participant.api_key,
-  }));
-  sessionStorage.setItem(storageKeyForRun(runId), JSON.stringify(securePayload));
+function storeRunKeys(_runId, _participants) {
 }
 
 function buildResumePayload(conversation) {
-  const stored = sessionStorage.getItem(storageKeyForRun(conversation.id));
-  let storedParticipants = [];
-  if (stored) {
-    try {
-      storedParticipants = JSON.parse(stored);
-    } catch (_error) {
-      storedParticipants = [];
-    }
-  }
-  const keysById = new Map(storedParticipants.map((item) => [item.participant_id, item.api_key]));
-
-  const participants = (conversation.config.participants || []).map((participant) => {
-    let apiKey = keysById.get(participant.participantId) || "";
-    if (!conversation.config.dryRun && !apiKey) {
-      apiKey = window.prompt(`Enter the API key for ${participant.label}.`, "") || "";
-    }
-    return {
+  return {
+    participants: (conversation.config.participants || []).map((participant) => ({
       participant_id: participant.participantId,
-      api_key: apiKey,
-    };
-  });
-
-  return { participants };
+    })),
+  };
 }
 
 function renderConfigChips(config) {
@@ -937,6 +1187,7 @@ async function loadProviders() {
   const data = await fetchJson("/api/models");
   state.providers = data.providers || [];
   state.maxParticipants = data.maxParticipants || 5;
+  state.billing = data.billing || state.billing;
 }
 
 function managePolling(conversation) {
@@ -979,11 +1230,12 @@ async function createConversation(event) {
     window.alert(`You can add at most ${state.maxParticipants} models.`);
     return;
   }
+  const accountGate = canAttemptConversation();
+  if (!accountGate.allowed) {
+    window.alert(accountGate.message);
+    return;
+  }
   for (const participant of payload.participants) {
-    if (!payload.dry_run && !participant.api_key) {
-      window.alert(`Add an API key for ${participant.label}.`);
-      return;
-    }
     if (!participant.model) {
       window.alert("Each selected model needs a concrete model version.");
       return;
@@ -993,6 +1245,15 @@ async function createConversation(event) {
   els.submitButton.disabled = true;
   els.submitButton.textContent = "Starting...";
   try {
+    const quote = await fetchJson("/api/billing/quote", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.quote = quote;
+    renderHomeBilling();
+    if (!quote.sufficientCredits) {
+      throw new Error("You do not have enough credits for this request.");
+    }
     const conversation = await fetchJson("/api/conversations", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -1017,7 +1278,6 @@ async function resumeConversation() {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    sessionStorage.setItem(storageKeyForRun(state.currentConversation.id), JSON.stringify(payload.participants));
     await loadConversationList();
     renderConversation(conversation);
     managePolling(conversation);
@@ -1140,6 +1400,31 @@ function renderAccountPage() {
 
   const isGoogleUser = state.user.authProvider === "google";
   els.passwordForm?.classList.toggle("hidden", isGoogleUser);
+  const account = activeAccount();
+  const billingBlock = account
+    ? `
+      <div class="account-row">
+        <span class="account-label">Subscription</span>
+        <strong>${escapeHtml(account.pricingPlanName || "No active plan")}</strong>
+      </div>
+      <div class="account-row">
+        <span class="account-label">Credits</span>
+        <strong>${escapeHtml(formatCredits(account.credits))}</strong>
+      </div>
+      <div class="account-row">
+        <span class="account-label">Billing status</span>
+        <strong>${escapeHtml(account.subscriptionStatus || account.status || "inactive")}</strong>
+      </div>
+      <div class="account-actions">
+        <a class="secondary-button" href="/pricing">Pricing</a>
+        ${account.stripeCustomerId ? '<button id="account-billing-portal" class="secondary-button" type="button">Manage billing</button>' : ""}
+      </div>
+    `
+    : `
+      <div class="account-actions">
+        <a class="secondary-button" href="/pricing">View pricing</a>
+      </div>
+    `;
 
   els.accountContent.innerHTML = `
     <div class="account-row">
@@ -1158,6 +1443,7 @@ function renderAccountPage() {
       <span class="account-label">Last activity</span>
       <strong id="account-latest-run">-</strong>
     </div>
+    ${billingBlock}
     ${isGoogleUser ? `
       <div class="account-row">
         <span class="account-label">Password</span>
@@ -1165,6 +1451,7 @@ function renderAccountPage() {
       </div>
     ` : ""}
   `;
+  document.getElementById("account-billing-portal")?.addEventListener("click", openBillingPortal);
 }
 
 function renderAccountStats(stats) {
@@ -1207,7 +1494,13 @@ async function bootHomePage() {
   await loadProviders();
   renderProviderPicker();
   defaultParticipants().forEach((participant) => addParticipantCard(participant));
+  renderHomeBilling();
+  els.questionInput?.addEventListener("input", scheduleQuoteRefresh);
+  els.roundsInput?.addEventListener("input", scheduleQuoteRefresh);
+  els.dryRunInput?.addEventListener("change", scheduleQuoteRefresh);
+  els.summarizerSelect?.addEventListener("change", scheduleQuoteRefresh);
   els.requestForm?.addEventListener("submit", createConversation);
+  scheduleQuoteRefresh();
 }
 
 async function bootConversationPage() {
@@ -1246,6 +1539,7 @@ function bootAccountPage() {
   loadAccountDetails()
     .then((payload) => {
       state.user = payload.user || state.user;
+      state.billing = payload.billing || state.billing;
       renderSidebarAccount();
       renderAccountPage();
       renderAccountStats(payload.stats || {});
@@ -1256,8 +1550,27 @@ function bootAccountPage() {
   els.passwordForm?.addEventListener("submit", handlePasswordChange);
 }
 
+async function bootPricingPage() {
+  if (state.billing) {
+    renderPricingPage();
+  }
+  await loadBilling();
+  renderPricingPage();
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("success") === "checkout") {
+    showPricingFeedback("Checkout completed. Stripe will confirm the payment and credits through a verified webhook.", false);
+  } else if (params.get("canceled") === "checkout") {
+    showPricingFeedback("Checkout was canceled.", true);
+  }
+}
+
 async function boot() {
   bindShell();
+  renderTopLinks();
+  renderSidebarAccount();
+  if (state.page === "pricing" && state.billing) {
+    renderPricingPage();
+  }
   await loadCurrentUser();
   showSuccessToast(consumeFlashMessage());
   if (els.conversationList) {
@@ -1282,6 +1595,10 @@ async function boot() {
   }
   if (state.page === "account") {
     bootAccountPage();
+    return;
+  }
+  if (state.page === "pricing") {
+    await bootPricingPage();
   }
 }
 

@@ -13,11 +13,21 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 import orchestrator as orch
+import pantheon_billing as billing
 import pantheon_storage as storage
 import webapp
 
 
 REQUIRED_TABLES = {"users", "sessions", "auth_events", "conversations"}
+BILLING_TABLES = {
+    "accounts",
+    "stripe_customers",
+    "subscriptions",
+    "credit_ledger",
+    "usage_events",
+    "pricing_plans",
+    "processed_webhook_events",
+}
 
 
 def main() -> int:
@@ -26,6 +36,7 @@ def main() -> int:
         raise SystemExit("DATABASE_URL is required.")
 
     storage.init_storage()
+    billing.init_billing_storage()
     engine = create_engine(storage.database_url(), future=True, pool_pre_ping=True)
 
     with engine.begin() as connection:
@@ -34,6 +45,9 @@ def main() -> int:
         missing = sorted(REQUIRED_TABLES - tables)
         if missing:
             raise SystemExit(f"Missing required tables: {', '.join(missing)}")
+        missing_billing = sorted(BILLING_TABLES - tables)
+        if missing_billing:
+            raise SystemExit(f"Missing billing tables: {', '.join(missing_billing)}")
 
     suffix = uuid4().hex[:10]
     email = f"pantheon-smoke-{suffix}@example.com"
@@ -54,6 +68,7 @@ def main() -> int:
 
         print("Database backend verified.")
         print(f"Tables present: {', '.join(sorted(REQUIRED_TABLES))}")
+        print(f"Billing tables present: {', '.join(sorted(BILLING_TABLES))}")
         print("Auth flow smoke test: passed")
         return 0
     finally:

@@ -416,6 +416,52 @@ def extract_xai_text(raw_response: Dict[str, Any]) -> str:
     return str(content).strip()
 
 
+def extract_usage_metrics(participant: ParticipantConfig, raw_response: Dict[str, Any]) -> Dict[str, int]:
+    usage = raw_response.get("usage") or {}
+    if participant.provider == "openai":
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+    if participant.provider == "anthropic":
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+    if participant.provider == "gemini":
+        usage_metadata = raw_response.get("usageMetadata") or {}
+        input_tokens = int(usage_metadata.get("promptTokenCount") or usage.get("input_tokens") or 0)
+        output_tokens = int(usage_metadata.get("candidatesTokenCount") or usage.get("output_tokens") or 0)
+        total_tokens = int(usage_metadata.get("totalTokenCount") or usage.get("total_tokens") or (input_tokens + output_tokens))
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+    if participant.provider == "xai":
+        input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
+
+
 def call_openai(api_key: str, model: str, prompt: str, max_output_tokens: int, reasoning: str) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "model": model,
@@ -702,20 +748,18 @@ def extract_runtime_keys(
     participant_payloads: List[Dict[str, Any]],
     use_env_fallback: bool,
 ) -> Dict[str, str]:
-    by_id = {str(item.get("participant_id") or item.get("id") or ""): item for item in participant_payloads}
     resolved: Dict[str, str] = {}
     missing: List[str] = []
     for participant in participants:
-        raw_payload = by_id.get(participant.participant_id, {})
-        api_key = str(raw_payload.get("api_key", "")).strip()
-        if not api_key and use_env_fallback:
-            api_key = get_env_value(*provider_env_names(participant.provider)) or ""
+        api_key = get_env_value(*provider_env_names(participant.provider)) or ""
         if not api_key:
             missing.append(participant.label)
             continue
         resolved[participant.participant_id] = api_key
     if missing:
-        raise ValueError("Missing API keys for: " + ", ".join(missing))
+        if use_env_fallback:
+            raise ValueError("Pantheon is not configured for: " + ", ".join(missing))
+        raise ValueError("Pantheon is not configured for: " + ", ".join(missing))
     return resolved
 
 

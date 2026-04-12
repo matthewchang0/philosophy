@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import os
 import secrets
@@ -24,6 +25,7 @@ from urllib.error import HTTPError
 from uuid import uuid4
 
 import orchestrator as orch
+import pantheon_billing as billing
 import pantheon_storage as storage
 
 try:
@@ -122,6 +124,7 @@ def auth_db() -> sqlite3.Connection:
 def init_auth_db() -> None:
     if durable_storage_enabled():
         storage.init_storage()
+        billing.init_billing_storage()
         return
     connection = auth_db()
     try:
@@ -198,6 +201,8 @@ def create_user(email: str, password: str, name: str = "", avatar_url: str = "",
 
     if durable_storage_enabled():
         persisted = storage.insert_user(user)
+        if durable_storage_enabled():
+            billing.ensure_account_for_user(persisted)
         storage.record_auth_event(
             user_id=persisted["id"],
             email=persisted["email"],
@@ -256,6 +261,7 @@ def upsert_google_user(email: str, name: str, avatar_url: str = "") -> Dict[str,
             }
             user["password_hash"] = hash_password(secrets.token_urlsafe(32), user["password_salt"])
             persisted = storage.insert_user(user)
+            billing.ensure_account_for_user(persisted)
             storage.record_auth_event(
                 user_id=persisted["id"],
                 email=persisted["email"],
@@ -270,6 +276,8 @@ def upsert_google_user(email: str, name: str, avatar_url: str = "") -> Dict[str,
         }
         storage.update_user(row["id"], patch)
         refreshed = storage.fetch_user_by_id(row["id"])
+        if refreshed:
+            billing.ensure_account_for_user(refreshed)
         storage.record_auth_event(
             user_id=row["id"],
             email=row["email"],
@@ -540,20 +548,8 @@ def user_payload(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     }
 
 
-def provider_catalog() -> List[Dict[str, Any]]:
-    providers = []
-    for provider_id, label in orch.PROVIDER_LABELS.items():
-        models = orch.MODEL_SUGGESTIONS.get(provider_id, [])
-        providers.append(
-            {
-                "id": provider_id,
-                "label": label,
-                "suggestedModels": models,
-                "defaultModel": models[0] if models else "",
-                "defaultMaxOutputTokens": orch.default_tokens_for_provider(provider_id),
-            }
-        )
-    return providers
+def provider_catalog(user: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    return billing.provider_catalog_for_user(user)
 
 
 def participant_payload_to_api(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -812,6 +808,28 @@ def user_run_stats(user: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def billing_overview_for_user(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return billing.billing_snapshot_for_user(user)
+
+
+def billing_quote_from_payload(
+    payload: Dict[str, Any],
+    user: Optional[Dict[str, Any]],
+    *,
+    completed_turns: Optional[List[orch.ConversationTurn]] = None,
+) -> Dict[str, Any]:
+    parsed = parse_request_payload(payload, allow_env_fallback=True)
+    return billing.quote_for_user(
+        user,
+        parsed["question"],
+        parsed["rounds"],
+        parsed["participants"],
+        parsed["summarizer_id"],
+        parsed["dry_run"],
+        completed_turns=completed_turns,
+    )
+
+
 def google_auth_enabled() -> bool:
     return bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"))
 
@@ -921,7 +939,7 @@ def parse_request_payload(payload: Dict[str, Any], allow_env_fallback: bool = Fa
         raise ValueError("Rounds must be at least 1.")
     summarizer_id = str(payload.get("summarizerId") or participants[-1].participant_id).strip()
     orch.participant_by_id(participants, summarizer_id)
-    runtime_keys = {} if dry_run else orch.extract_runtime_keys(participants, participants_raw, use_env_fallback=allow_env_fallback)
+    runtime_keys = {} if dry_run else orch.extract_runtime_keys(participants, participants_raw, use_env_fallback=True)
     return {
         "question": question,
         "rounds": rounds,
@@ -966,11 +984,15 @@ def execute_conversation(
     runtime_keys: Dict[str, str],
     dry_run: bool,
     resume_state: Optional[orch.ResumeState] = None,
+    usage_event_id: str = "",
+    billing_turns_start_index: int = 0,
 ) -> None:
     run_id = run_dir.name
     turns = list(resume_state.turns) if resume_state else []
     summary_markdown = resume_state.summary_markdown if resume_state else ""
     summarizer = orch.participant_by_id(participants, summarizer_id)
+    if usage_event_id:
+        billing.mark_usage_running(usage_event_id)
 
     write_web_state(
         run_dir,
@@ -1022,7 +1044,7 @@ def execute_conversation(
                         prompt=prompt,
                         response_text=orch.normalize_response_text(orch.extract_response_text(participant, raw_response)),
                         citations=orch.extract_response_citations(participant, raw_response),
-                        usage=raw_response.get("usage", {}),
+                        usage=orch.extract_usage_metrics(participant, raw_response),
                         raw_response=raw_response,
                     )
                 turns.append(turn)
@@ -1050,7 +1072,7 @@ def execute_conversation(
                     prompt=summary_prompt,
                     response_text=orch.normalize_response_text(orch.extract_response_text(summarizer, raw_response)),
                     citations=orch.extract_response_citations(summarizer, raw_response),
-                    usage=raw_response.get("usage", {}),
+                    usage=orch.extract_usage_metrics(summarizer, raw_response),
                     raw_response=raw_response,
                     is_summary=True,
                 )
@@ -1094,48 +1116,73 @@ def execute_conversation(
         )
         sync_run_dir_to_storage(run_dir)
     finally:
+        if usage_event_id:
+            new_turns = turns[billing_turns_start_index:]
+            status = "completed" if summary_markdown.strip() else "failed"
+            try:
+                billing.settle_usage_for_run(usage_event_id, new_turns, final_status=status)
+            except Exception:  # pragma: no cover
+                pass
         clear_active_run(run_id)
 
 
 def start_new_conversation(payload: Dict[str, Any], user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not user:
+        raise PermissionError("You must be logged in to start a paid conversation.")
     parsed = parse_request_payload(payload, allow_env_fallback=False)
     question = parsed["question"]
     if not question:
         raise ValueError("Question is required.")
 
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
-    run_dir = RUNS_ROOT / f"{orch.now_stamp()}-{orch.slugify(question)}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    write_web_state(
-        run_dir,
-        {
-            "question": question,
-            "status": "queued",
-            "created_at": iso_now(),
-            "updated_at": iso_now(),
-            "error": "",
-            "owner_user_id": user.get("id", "") if user else "",
-            "owner_email": user.get("email", "") if user else "",
-        },
+    run_id = f"{orch.now_stamp()}-{orch.slugify(question)}"
+    reservation = billing.reserve_credits_for_run(
+        user or {},
+        conversation_id=run_id,
+        question=question,
+        rounds=parsed["rounds"],
+        participants=parsed["participants"],
+        summarizer_id=parsed["summarizer_id"],
+        dry_run=parsed["dry_run"],
     )
-    orch.write_markdown_logs(
-        run_dir,
-        question,
-        parsed["participants"],
-        parsed["summarizer_id"],
-        [],
-        "",
-    )
-    orch.write_run_metadata(
-        run_dir,
-        question,
-        parsed["rounds"],
-        parsed["participants"],
-        parsed["summarizer_id"],
-        [],
-        parsed["dry_run"],
-    )
-    sync_run_dir_to_storage(run_dir)
+    run_dir = RUNS_ROOT / run_id
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_web_state(
+            run_dir,
+            {
+                "question": question,
+                "status": "queued",
+                "created_at": iso_now(),
+                "updated_at": iso_now(),
+                "error": "",
+                "owner_user_id": user.get("id", "") if user else "",
+                "owner_email": user.get("email", "") if user else "",
+                "usage_event_id": reservation["usageEventId"],
+                "reserved_credits": reservation["reservedCredits"],
+            },
+        )
+        orch.write_markdown_logs(
+            run_dir,
+            question,
+            parsed["participants"],
+            parsed["summarizer_id"],
+            [],
+            "",
+        )
+        orch.write_run_metadata(
+            run_dir,
+            question,
+            parsed["rounds"],
+            parsed["participants"],
+            parsed["summarizer_id"],
+            [],
+            parsed["dry_run"],
+        )
+        sync_run_dir_to_storage(run_dir)
+    except Exception:
+        billing.settle_usage_for_run(reservation["usageEventId"], [], final_status="failed")
+        raise
 
     if should_run_inline():
         execute_conversation(
@@ -1146,8 +1193,12 @@ def start_new_conversation(payload: Dict[str, Any], user: Optional[Dict[str, Any
             parsed["summarizer_id"],
             parsed["runtime_keys"],
             parsed["dry_run"],
+            usage_event_id=reservation["usageEventId"],
+            billing_turns_start_index=0,
         )
-        return build_conversation_payload(run_dir)
+        conversation = build_conversation_payload(run_dir)
+        conversation["billing"] = {"reservation": reservation}
+        return conversation
 
     thread = threading.Thread(
         target=execute_conversation,
@@ -1159,16 +1210,23 @@ def start_new_conversation(payload: Dict[str, Any], user: Optional[Dict[str, Any
             parsed["summarizer_id"],
             parsed["runtime_keys"],
             parsed["dry_run"],
+            None,
+            reservation["usageEventId"],
+            0,
         ),
         daemon=True,
     )
     register_active_run(run_dir.name, thread)
     thread.start()
     sync_run_dir_to_storage(run_dir)
-    return build_conversation_payload(run_dir)
+    conversation = build_conversation_payload(run_dir)
+    conversation["billing"] = {"reservation": reservation}
+    return conversation
 
 
 def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not user:
+        raise PermissionError("You must be logged in to resume a paid conversation.")
     run_dir = RUNS_ROOT / run_id
     if durable_storage_enabled():
         record = storage.fetch_conversation(run_id)
@@ -1193,6 +1251,18 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
         if bool(resume_state.metadata.get("dry_run", False))
         else orch.extract_runtime_keys(resume_state.participants, participant_payloads, use_env_fallback=False)
     )
+    reservation = billing.reserve_credits_for_run(
+        user or {},
+        conversation_id=run_id,
+        question=resume_state.question,
+        rounds=resume_state.rounds,
+        participants=resume_state.participants,
+        summarizer_id=resume_state.summarizer_id,
+        dry_run=bool(resume_state.metadata.get("dry_run", False)),
+        completed_turns=resume_state.turns,
+    )
+    write_web_state(run_dir, {"usage_event_id": reservation["usageEventId"], "reserved_credits": reservation["reservedCredits"]})
+    sync_run_dir_to_storage(run_dir)
 
     if should_run_inline():
         write_web_state(run_dir, {"status": "running", "error": ""})
@@ -1206,11 +1276,17 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
             runtime_keys,
             bool(resume_state.metadata.get("dry_run", False)),
             resume_state,
+            usage_event_id=reservation["usageEventId"],
+            billing_turns_start_index=len(resume_state.turns),
         )
         if durable_storage_enabled():
             record = storage.fetch_conversation(run_id)
-            return build_conversation_payload_from_record(record) if record else build_conversation_payload(run_dir)
-        return build_conversation_payload(run_dir)
+            conversation = build_conversation_payload_from_record(record) if record else build_conversation_payload(run_dir)
+            conversation["billing"] = {"reservation": reservation}
+            return conversation
+        conversation = build_conversation_payload(run_dir)
+        conversation["billing"] = {"reservation": reservation}
+        return conversation
 
     thread = threading.Thread(
         target=execute_conversation,
@@ -1223,6 +1299,8 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
             runtime_keys,
             bool(resume_state.metadata.get("dry_run", False)),
             resume_state,
+            reservation["usageEventId"],
+            len(resume_state.turns),
         ),
         daemon=True,
     )
@@ -1232,8 +1310,12 @@ def resume_conversation(run_id: str, payload: Dict[str, Any], user: Optional[Dic
     sync_run_dir_to_storage(run_dir)
     if durable_storage_enabled():
         record = storage.fetch_conversation(run_id)
-        return build_conversation_payload_from_record(record) if record else build_conversation_payload(run_dir)
-    return build_conversation_payload(run_dir)
+        conversation = build_conversation_payload_from_record(record) if record else build_conversation_payload(run_dir)
+        conversation["billing"] = {"reservation": reservation}
+        return conversation
+    conversation = build_conversation_payload(run_dir)
+    conversation["billing"] = {"reservation": reservation}
+    return conversation
 
 
 def file_response_path(path: str) -> Path:
@@ -1247,6 +1329,22 @@ def file_response_path(path: str) -> Path:
     if not candidate.exists() or not candidate.is_file():
         raise FileNotFoundError(relative)
     return candidate
+
+
+def pricing_bootstrap_script(user: Optional[Dict[str, Any]]) -> str:
+    return (
+        "<script>"
+        + "window.__PANTHEON_INITIAL_USER__ = "
+        + json.dumps(user_payload(user))
+        + "; window.__PANTHEON_INITIAL_BILLING__ = "
+        + json.dumps(billing_overview_for_user(user))
+        + ";</script>"
+    )
+
+
+def render_pricing_html(user: Optional[Dict[str, Any]]) -> bytes:
+    template = (WEB_ROOT / "pricing.html").read_text(encoding="utf-8")
+    return template.replace("__PANTHEON_PRICING_BOOTSTRAP__", pricing_bootstrap_script(user)).encode("utf-8")
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -1309,6 +1407,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/privacy":
             self.serve_static_file("privacy.html")
+            return
+
+        if parsed.path == "/pricing":
+            self.send_html(render_pricing_html(self.current_user()))
             return
 
         if parsed.path == "/auth/google/start":
@@ -1374,7 +1476,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
 
         if parsed.path == "/api/models":
-            self.send_json({"providers": provider_catalog(), "maxParticipants": orch.MAX_PARTICIPANTS})
+            self.send_json(
+                {
+                    "providers": provider_catalog(self.current_user()),
+                    "maxParticipants": orch.MAX_PARTICIPANTS,
+                    "billing": billing_overview_for_user(self.current_user()),
+                }
+            )
             return
 
         if parsed.path == "/api/health":
@@ -1385,6 +1493,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     "runtime": "vercel" if IS_VERCEL else "local",
                     "baseUrl": app_base_url(self),
                     "googleAuthEnabled": google_auth_enabled(),
+                    "billingReady": billing.billing_backend_ready(),
+                    "stripeReady": billing.stripe_ready(),
                 }
             )
             return
@@ -1398,7 +1508,11 @@ class AppHandler(BaseHTTPRequestHandler):
             if not user:
                 self.send_json({"error": "You must be logged in."}, status=HTTPStatus.UNAUTHORIZED)
                 return
-            self.send_json({"user": user_payload(user), "stats": user_run_stats(user)})
+            self.send_json({"user": user_payload(user), "stats": user_run_stats(user), "billing": billing_overview_for_user(user)})
+            return
+
+        if parsed.path == "/api/billing":
+            self.send_json(billing_overview_for_user(self.current_user()))
             return
 
         if parsed.path == "/api/conversations":
@@ -1479,6 +1593,78 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True}, headers={"Set-Cookie": self.session_cookie_header("", expires=True)})
             return
 
+        if parsed.path == "/api/billing/quote":
+            try:
+                payload = self.read_json_body()
+                quote = billing_quote_from_payload(payload, self.current_user())
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except PermissionError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json(quote)
+            return
+
+        if parsed.path == "/api/billing/checkout":
+            user = self.current_user()
+            if not user:
+                self.send_json({"error": "You must be logged in."}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self.read_json_body()
+                plan_id = str(payload.get("planId", payload.get("plan_id", ""))).strip()
+                if not plan_id:
+                    raise ValueError("Choose a pricing option first.")
+                checkout = billing.create_checkout_session(user, plan_id, app_base_url(self))
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json(checkout)
+            return
+
+        if parsed.path == "/api/billing/portal":
+            user = self.current_user()
+            if not user:
+                self.send_json({"error": "You must be logged in."}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                session = billing.create_billing_portal_session(user, app_base_url(self))
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json(session)
+            return
+
+        if parsed.path == "/api/stripe/webhook":
+            try:
+                raw = self.read_raw_body()
+                signature = str(self.headers.get("Stripe-Signature", "")).strip()
+                result = billing.handle_stripe_webhook(raw, signature)
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json(result)
+            return
+
         if parsed.path == "/api/account/password":
             user = self.current_user()
             if not user:
@@ -1508,6 +1694,9 @@ class AppHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self.send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
                 return
+            except PermissionError as exc:
+                self.send_json({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+                return
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -1528,7 +1717,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Conversation not found."}, status=HTTPStatus.NOT_FOUND)
                     return
                 except PermissionError as exc:
-                    self.send_json({"error": str(exc)}, status=HTTPStatus.FORBIDDEN)
+                    status = HTTPStatus.UNAUTHORIZED if "logged in" in str(exc).lower() else HTTPStatus.FORBIDDEN
+                    self.send_json({"error": str(exc)}, status=status)
                     return
                 except ValueError as exc:
                     self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -1539,13 +1729,17 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_json({"error": "Not found."}, status=HTTPStatus.NOT_FOUND)
 
     def read_json_body(self) -> Dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0:
-            return {}
-        raw = self.rfile.read(length)
+        raw = self.read_raw_body()
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8"))
+
+    def read_raw_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            return b""
+        raw = self.rfile.read(length)
+        return raw or b""
 
     def send_json(
         self,
@@ -1575,6 +1769,13 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime or "application/octet-stream")
         self.end_headers()
         self.wfile.write(file_path.read_bytes())
+
+    def send_html(self, body: bytes, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         return

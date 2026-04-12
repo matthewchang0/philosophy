@@ -20,6 +20,7 @@
           <nav id="top-links" class="top-links">
             <a href="/login">Log in</a>
             <a href="/signup">Sign up</a>
+            <a href="/pricing">Pricing</a>
             <a href="/privacy">Privacy Policy</a>
           </nav>
         </header>
@@ -29,18 +30,18 @@
             <p class="eyebrow">Privacy Policy</p>
             <h1>Pantheon Privacy Policy</h1>
             <p>
-              Pantheon is designed so users can bring their own API keys for ChatGPT, Claude, Gemini, and Grok. We do not
-              intentionally distribute, publish, or sell your API keys.
+              Pantheon is designed so model usage runs through platform-owned server-side API keys for ChatGPT, Claude, Gemini,
+              and Grok. We do not expose those provider keys to end users through the browser.
             </p>
 
-            <h2>How Pantheon handles API keys</h2>
+            <h2>How Pantheon handles provider access</h2>
             <p>
-              API keys entered in the Pantheon web app are used only to make the requested model calls for your live session.
-              They are kept in browser session storage so you can resume the current run during the same browser session.
+              Provider requests are routed through Pantheon servers. End users do not paste provider API keys into the product,
+              and Pantheon does not store per-user provider API keys as part of the account flow.
             </p>
             <p>
-              Pantheon does not write those keys into <code>run.json</code>, <code>transcript.md</code>, or
-              <code>summary.md</code>, and the saved run artifacts are built to exclude API key values.
+              Pantheon does not write provider secrets into <code>run.json</code>, <code>transcript.md</code>, or
+              <code>summary.md</code>, and saved run artifacts are built to exclude secret values.
             </p>
 
             <h2>What gets saved</h2>

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pricing · Pantheon</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-page="pricing">
+    <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
+      <div class="main-shell main-shell-full">
+        <header class="topbar topbar-detail">
+          <a href="/" class="home-button" aria-label="Go to Pantheon home">
+            <img src="/logo.svg" alt="" class="home-button-icon" />
+          </a>
+          <div class="topbar-spacer"></div>
+          <nav id="top-links" class="top-links">
+            <a href="/login">Log in</a>
+            <a href="/signup">Sign up</a>
+            <a href="/pricing">Pricing</a>
+            <a href="/privacy">Privacy Policy</a>
+          </nav>
+        </header>
+        <main class="auth-stage pricing-stage">
+          <section class="auth-card pricing-card-shell">
+            <p class="eyebrow">Pricing</p>
+            <h1>Prepaid access, guarded by design</h1>
+            <p class="auth-copy">
+              Pantheon only runs with platform-owned provider keys. Every request is quoted, reserved, and settled against prepaid credits before any model call is made.
+            </p>
+            <div id="pricing-summary" class="pricing-summary"></div>
+            <div id="pricing-grid" class="pricing-grid"></div>
+            <div id="pricing-feedback" class="error-banner hidden"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+    __PANTHEON_PRICING_BOOTSTRAP__
+    <script src="/app.js" defer></script>
+  </body>
+</html>

@@ -2,14 +2,15 @@
 
 Pantheon is a multi-model conversation studio for OpenAI, Anthropic, Gemini, and xAI.
 
-Users choose which models participate, paste their own API keys in the web app, select which participant writes the final synthesis, and watch the full conversation unfold round by round.
+Users choose which models participate, select which participant writes the final synthesis, and watch the full conversation unfold round by round. All provider calls run through platform-owned server-side API keys.
 
 ## What Changed
 
 - The app no longer assumes only OpenAI plus Anthropic.
 - Users can choose 1 to 5 participants.
 - Each participant can use a different provider and model.
-- API keys come from the user at runtime and are not written into `run.json`.
+- Provider API keys stay on the server and are never exposed to the browser.
+- Every run is prepaid through credits before the first provider call is made.
 - The conversation framing is open-ended and collaborative.
 - The final synthesis is now one compact section with:
   - `Snapshot`
@@ -43,9 +44,37 @@ The home page lets users:
 - enter a prompt
 - choose 1 to 5 participants
 - choose provider and model per participant
-- paste an API key per participant
 - choose the final synthesizer
-- run a dry run without hitting any provider API
+- see the estimated credit cost before running
+
+## Billing
+
+Pantheon now uses a prepaid billing model with server-owned provider keys:
+
+- no free tier
+- no user-provided provider API keys
+- active subscription required before any paid run
+- optional prepaid credit packs for overage
+- Stripe Checkout for plan purchases and credit packs
+- verified Stripe webhooks before granting credits
+- append-only credit ledger for every grant, reservation, and refund
+
+Stripe webhook events handled:
+
+- `checkout.session.completed`
+- `invoice.paid`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+
+Before Pantheon executes a run:
+
+1. It validates the account has an active paid subscription.
+2. It estimates the maximum bounded provider cost.
+3. It converts that maximum cost into credits with a safety margin.
+4. It reserves those credits up front.
+5. It blocks the run if the balance is insufficient.
+6. It settles actual usage after execution and refunds unused credits.
 
 The conversation page shows:
 
@@ -73,6 +102,18 @@ POSTGRES_URL=postgresql://...
 PANTHEON_BASE_URL=https://your-project.vercel.app
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...
+XAI_API_KEY=...
+STRIPE_SECRET_KEY=...
+STRIPE_WEBHOOK_SECRET=...
+STRIPE_PRICE_STARTER_MONTHLY=...
+STRIPE_PRICE_PRO_MONTHLY=...
+STRIPE_PRICE_SCALE_MONTHLY=...
+STRIPE_PRICE_CREDITS_2500=...
+STRIPE_PRICE_CREDITS_8000=...
+PANTHEON_MODEL_COSTS_JSON={...}
 ```
 
 For Vercel, use the same `DATABASE_URL` in every environment where you want the same customer data to appear.
@@ -94,6 +135,8 @@ Smoke test the production backend with:
 ```bash
 python3 scripts/verify_database_backend.py
 ```
+
+That verification now checks both the account/auth schema and the billing tables.
 
 ### Google Sign-In
 
@@ -144,10 +187,10 @@ Each run writes a folder under `runs/` with:
 - `run.json`
 - `web_state.json`
 
-`run.json` stores participant configuration and turns, but not API keys.
+`run.json` stores participant configuration and turns, but never provider API keys.
 
 ## Notes
 
-- The web app expects user-supplied API keys at request time.
-- If a run is resumed from the web UI, the app asks for keys again if they are not still in browser session storage.
-- Dry runs work without any API key.
+- The web app uses only server-side provider API keys.
+- Model availability is gated by both server configuration and the account's paid plan.
+- If a model does not have a configured bounded cost profile, Pantheon will refuse to run it.
