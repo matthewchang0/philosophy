@@ -53,6 +53,30 @@ The conversation page shows:
 - the transcript grouped by round
 - a single final synthesis section at the bottom
 
+### Google Sign-In
+
+Pantheon supports `Continue with Google` on the login and signup pages.
+
+Set these environment variables:
+
+```bash
+GOOGLE_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
+PANTHEON_BASE_URL=http://127.0.0.1:8000
+```
+
+In Google Cloud Console, create a Web application OAuth client and add this redirect URI:
+
+```text
+http://127.0.0.1:8000/auth/google/callback
+```
+
+For Vercel, set `PANTHEON_BASE_URL` to your deployed site URL and add:
+
+```text
+https://your-project.vercel.app/auth/google/callback
+```
+
 ## CLI
 
 There is still a terminal entry point:

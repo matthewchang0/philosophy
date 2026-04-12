@@ -552,14 +552,22 @@ def google_auth_enabled() -> bool:
     return bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"))
 
 
-def google_redirect_uri(handler: "AppHandler") -> str:
+def app_base_url(handler: "AppHandler") -> str:
     configured = str(os.environ.get("PANTHEON_BASE_URL", "")).strip().rstrip("/")
     if configured:
-        return f"{configured}/auth/google/callback"
+        return configured
+    vercel_url = str(os.environ.get("VERCEL_URL", "")).strip()
+    if vercel_url:
+        return f"https://{vercel_url.strip().rstrip('/')}"
     forwarded_proto = str(handler.headers.get("X-Forwarded-Proto", "")).strip()
-    scheme = forwarded_proto or ("https" if handler.headers.get("Host", "").startswith("pantheon") else "http")
-    host = handler.headers.get("Host", "127.0.0.1:8002")
-    return f"{scheme}://{host}/auth/google/callback"
+    forwarded_host = str(handler.headers.get("X-Forwarded-Host", "")).strip()
+    scheme = forwarded_proto or "http"
+    host = forwarded_host or handler.headers.get("Host", "127.0.0.1:8002")
+    return f"{scheme}://{host}"
+
+
+def google_redirect_uri(handler: "AppHandler") -> str:
+    return f"{app_base_url(handler)}/auth/google/callback"
 
 
 def google_authorize_url(handler: "AppHandler", state_token: str) -> str:
@@ -593,8 +601,11 @@ def exchange_google_code(handler: "AppHandler", code: str) -> Dict[str, Any]:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urlopen(request, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Google token exchange failed: {exc}") from exc
 
 
 def fetch_google_profile(access_token: str) -> Dict[str, Any]:
@@ -602,8 +613,11 @@ def fetch_google_profile(access_token: str) -> Dict[str, Any]:
         "https://openidconnect.googleapis.com/v1/userinfo",
         headers={"Authorization": f"Bearer {access_token}"},
     )
-    with urlopen(request, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Google profile request failed: {exc}") from exc
 
 
 def list_conversations(user: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -1242,6 +1256,7 @@ def parse_server_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    orch.load_dotenv(APP_ROOT / ".env")
     args = parse_server_args()
     RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     init_auth_db()
