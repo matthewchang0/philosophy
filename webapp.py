@@ -1461,6 +1461,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_html(render_pricing_html(self.current_user()))
             return
 
+        if parsed.path == "/pricing-not-available":
+            self.serve_static_file("pricing-not-available.html")
+            return
+
         if parsed.path == "/auth/google/start":
             if not google_auth_enabled():
                 self.redirect("/signup?error=Google+sign-in+is+not+configured+yet.")

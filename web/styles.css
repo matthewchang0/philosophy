@@ -74,6 +74,18 @@ textarea {
   transition: opacity 220ms ease, transform 220ms ease;
 }
 
+.flash-toast.success {
+  border: 1px solid rgba(35, 115, 66, 0.22);
+  background: linear-gradient(180deg, #3ba264 0%, #2e8a54 100%);
+  box-shadow: 0 20px 48px rgba(31, 92, 55, 0.22);
+}
+
+.flash-toast.error {
+  border: 1px solid rgba(138, 33, 33, 0.26);
+  background: linear-gradient(180deg, #d44a4a 0%, #b63131 100%);
+  box-shadow: 0 20px 48px rgba(117, 28, 28, 0.24);
+}
+
 .flash-toast.visible {
   opacity: 1;
   transform: translate(-50%, 0);

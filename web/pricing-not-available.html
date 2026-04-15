@@ -3,11 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Account · Pantheon</title>
+    <title>Pricing Not Available · Pantheon</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body data-page="account">
+  <body data-page="pricing-not-available">
     <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
       <div class="main-shell main-shell-full">
         <header class="topbar topbar-detail">
@@ -21,28 +21,13 @@
             <a href="/pricing-not-available">Pricing</a>
           </nav>
         </header>
-        <main class="auth-stage">
-          <section id="account-panel" class="auth-card">
-            <p class="eyebrow">Account</p>
-            <h1>Your Pantheon account</h1>
-            <div id="account-content" class="account-content"></div>
-            <form id="password-form" class="auth-form password-form">
-              <h2 class="account-subhead">Change password</h2>
-              <label class="field">
-                <span>Current password</span>
-                <input id="current-password" type="password" autocomplete="current-password" required />
-              </label>
-              <label class="field">
-                <span>New password</span>
-                <input id="new-password" type="password" autocomplete="new-password" required />
-              </label>
-              <label class="field">
-                <span>Confirm new password</span>
-                <input id="confirm-password" type="password" autocomplete="new-password" required />
-              </label>
-              <div id="password-error" class="error-banner hidden"></div>
-              <button id="password-submit" class="secondary-button" type="submit">Update password</button>
-            </form>
+        <main class="auth-stage pricing-stage">
+          <section class="auth-card pricing-card-shell">
+            <p class="eyebrow">Pricing</p>
+            <h1>Pricing not available yet</h1>
+            <p class="auth-copy">
+              Our finances are currently being connected to Stripe. Pricing plans will be available soon.
+            </p>
           </section>
         </main>
         <footer class="site-footer">
@@ -64,7 +49,6 @@
         </footer>
       </div>
     </div>
-    __PANTHEON_BOOTSTRAP__
     <script src="/app.js" defer></script>
   </body>
 </html>

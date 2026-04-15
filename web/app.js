@@ -161,7 +161,7 @@ function consumeFlashMessage() {
   }
 }
 
-function showSuccessToast(message) {
+function showToast(message, variant = "success") {
   if (!message) {
     return;
   }
@@ -170,11 +170,13 @@ function showSuccessToast(message) {
     toast = document.createElement("div");
     toast.id = "app-flash-toast";
     toast.className = "flash-toast";
-    toast.setAttribute("role", "status");
-    toast.setAttribute("aria-live", "polite");
     document.body.appendChild(toast);
   }
+  toast.setAttribute("role", variant === "error" ? "alert" : "status");
+  toast.setAttribute("aria-live", variant === "error" ? "assertive" : "polite");
   toast.textContent = message;
+  toast.classList.remove("success", "error");
+  toast.classList.add(variant);
   toast.classList.add("visible");
   toast.classList.remove("fading");
   if (state.flashTimeout) {
@@ -187,6 +189,14 @@ function showSuccessToast(message) {
       toast?.remove();
     }, 500);
   }, 5000);
+}
+
+function showSuccessToast(message) {
+  showToast(message, "success");
+}
+
+function showErrorToast(message) {
+  showToast(message, "error");
 }
 
 function escapeHtml(value) {
@@ -475,20 +485,20 @@ function renderTopLinks() {
       links.push(`<a href="/">New conversation</a>`);
     }
     links.push(`<a href="/account">Account</a>`);
-    links.push(`<a href="/pricing">Pricing</a>`);
+    links.push(`<a href="/pricing-not-available">Pricing</a>`);
     links.push(`<button class="top-link-button" type="button" data-action="logout">Log out</button>`);
   } else if (state.page === "login") {
     links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
-    links.push(`<a href="/pricing">Pricing</a>`);
+    links.push(`<a href="/pricing-not-available">Pricing</a>`);
   } else if (state.page === "signup") {
     links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
-    links.push(`<a href="/pricing">Pricing</a>`);
+    links.push(`<a href="/pricing-not-available">Pricing</a>`);
   } else {
     links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
-    links.push(`<a href="/pricing">Pricing</a>`);
+    links.push(`<a href="/pricing-not-available">Pricing</a>`);
   }
 
   els.topLinks.innerHTML = links.join("");
@@ -585,15 +595,25 @@ function activeAccount() {
   return state.billing?.account || null;
 }
 
+function modelsAvailableToUser(provider) {
+  const allowedModels = (provider?.models || [])
+    .filter((item) => item.allowed)
+    .map((item) => item.id);
+  if (allowedModels.length) {
+    return allowedModels;
+  }
+  return (provider?.suggestedModels || []).filter(Boolean);
+}
+
 function canAttemptConversation() {
   const account = activeAccount();
   if (!state.user || !account) {
-    return { allowed: false, message: "Log in and subscribe before running Pantheon." };
+    return { allowed: false, message: "A paid plan is required before you can start a conversation.", reason: "unpaid" };
   }
   if (account.status !== "active" || account.subscriptionStatus !== "active") {
-    return { allowed: false, message: "An active paid subscription is required before you can run Pantheon." };
+    return { allowed: false, message: "A paid plan is required before you can start a conversation.", reason: "unpaid" };
   }
-  return { allowed: true, message: "" };
+  return { allowed: true, message: "", reason: "" };
 }
 
 function renderHomeBilling() {
@@ -613,7 +633,7 @@ function renderHomeBilling() {
     els.quoteEstimate.textContent = "Estimated cost will appear after you log in.";
     els.billingMessage.textContent = "Pantheon does not allow unpaid runs.";
     if (els.submitButton) {
-      els.submitButton.disabled = true;
+      els.submitButton.disabled = false;
     }
     return;
   }
@@ -637,8 +657,7 @@ function renderHomeBilling() {
   els.billingMessage.textContent = messages.join(" ");
 
   if (els.submitButton) {
-    const accountGate = canAttemptConversation();
-    els.submitButton.disabled = !accountGate.allowed || Boolean(state.quote && !state.quote.sufficientCredits);
+    els.submitButton.disabled = Boolean(state.quote && !state.quote.sufficientCredits);
   }
 }
 
@@ -805,11 +824,10 @@ function renderProviderPicker() {
   els.providerPicker.innerHTML = state.providers
     .map((provider) => {
       const providerDisabled = disabled;
-      const availabilityNote = (provider.models || []).every((model) => !model.available)
-        ? "Currently unavailable"
-        : !(provider.models || []).some((model) => model.allowed)
-          ? "Upgrade plan to use"
-          : (provider.suggestedModels || []).join(" · ");
+      const allowedModelNames = modelsAvailableToUser(provider);
+      const availabilityNote = !(provider.models || []).some((model) => model.allowed)
+        ? "Upgrade plan to use"
+        : allowedModelNames.join(" · ");
       return `
       <button class="provider-tile ${provider.id}" type="button" data-provider-id="${escapeHtml(provider.id)}" ${providerDisabled ? "disabled" : ""}>
         ${providerIcon(provider.id, "provider-icon provider-icon-large")}
@@ -842,7 +860,7 @@ function bindParticipantCard(node) {
   const modelOptions = provider?.models || [];
   modelSelect.innerHTML = modelOptions
     .map((item) => {
-      const suffix = !item.available ? " (currently unavailable)" : !item.allowed ? " (plan upgrade required)" : "";
+      const suffix = !item.allowed ? " (plan upgrade required)" : "";
       return `<option value="${escapeHtml(item.id)}">${escapeHtml(item.id + suffix)}</option>`;
     })
     .join("");
@@ -1216,7 +1234,7 @@ async function createConversation(event) {
   }
   const accountGate = canAttemptConversation();
   if (!accountGate.allowed) {
-    window.alert(accountGate.message);
+    showErrorToast(accountGate.message);
     return;
   }
   for (const participant of payload.participants) {

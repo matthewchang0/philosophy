@@ -274,8 +274,7 @@ def configured_model_cost(provider: str, model: str) -> Optional[Dict[str, Any]]
 
 def platform_model_available(provider: str, model: str) -> tuple[bool, str]:
     if not _provider_configured(provider):
-        provider_label = orch.PROVIDER_LABELS.get(provider, provider)
-        return (False, f"{provider_label} is currently unavailable.")
+        return (False, "")
     if configured_model_cost(provider, model) is None:
         return (False, f"{model} does not have a bounded cost profile configured.")
     return (True, "")
