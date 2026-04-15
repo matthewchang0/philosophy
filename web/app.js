@@ -806,7 +806,7 @@ function renderProviderPicker() {
     .map((provider) => {
       const providerDisabled = disabled;
       const availabilityNote = (provider.models || []).every((model) => !model.available)
-        ? "Needs server API key"
+        ? "Currently unavailable"
         : !(provider.models || []).some((model) => model.allowed)
           ? "Upgrade plan to use"
           : (provider.suggestedModels || []).join(" · ");
@@ -842,7 +842,7 @@ function bindParticipantCard(node) {
   const modelOptions = provider?.models || [];
   modelSelect.innerHTML = modelOptions
     .map((item) => {
-      const suffix = !item.available ? " (needs server API key)" : !item.allowed ? " (plan upgrade required)" : "";
+      const suffix = !item.available ? " (currently unavailable)" : !item.allowed ? " (plan upgrade required)" : "";
       return `<option value="${escapeHtml(item.id)}">${escapeHtml(item.id + suffix)}</option>`;
     })
     .join("");
