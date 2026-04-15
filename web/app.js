@@ -17,6 +17,7 @@ const state = {
   sidebarCollapsed: true,
   flashTimeout: null,
   quoteHandle: null,
+  accountStats: null,
 };
 
 if (window.__PANTHEON_INITIAL_USER__) {
@@ -24,6 +25,24 @@ if (window.__PANTHEON_INITIAL_USER__) {
 }
 if (window.__PANTHEON_INITIAL_BILLING__) {
   state.billing = window.__PANTHEON_INITIAL_BILLING__;
+}
+if (window.__PANTHEON_INITIAL_PROVIDERS__) {
+  state.providers = window.__PANTHEON_INITIAL_PROVIDERS__;
+}
+if (window.__PANTHEON_INITIAL_CONVERSATIONS__) {
+  state.conversations = window.__PANTHEON_INITIAL_CONVERSATIONS__;
+}
+if (typeof window.__PANTHEON_INITIAL_GOOGLE_AUTH_ENABLED__ === "boolean") {
+  state.googleAuthEnabled = window.__PANTHEON_INITIAL_GOOGLE_AUTH_ENABLED__;
+}
+if (window.__PANTHEON_INITIAL_ACCOUNT__) {
+  state.accountStats = window.__PANTHEON_INITIAL_ACCOUNT__.stats || null;
+  if (window.__PANTHEON_INITIAL_ACCOUNT__.user) {
+    state.user = window.__PANTHEON_INITIAL_ACCOUNT__.user;
+  }
+  if (window.__PANTHEON_INITIAL_ACCOUNT__.billing) {
+    state.billing = window.__PANTHEON_INITIAL_ACCOUNT__.billing;
+  }
 }
 
 const els = {
@@ -454,28 +473,22 @@ function renderTopLinks() {
   if (state.user) {
     if (state.page === "conversation") {
       links.push(`<a href="/">New conversation</a>`);
-    } else if (state.page === "privacy") {
-      links.push(`<a href="/">Home</a>`);
     }
     links.push(`<a href="/account">Account</a>`);
     links.push(`<a href="/pricing">Pricing</a>`);
-    links.push(`<a href="/privacy">Privacy Policy</a>`);
     links.push(`<button class="top-link-button" type="button" data-action="logout">Log out</button>`);
   } else if (state.page === "login") {
     links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
     links.push(`<a href="/pricing">Pricing</a>`);
-    links.push(`<a href="/privacy">Privacy Policy</a>`);
   } else if (state.page === "signup") {
     links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
     links.push(`<a href="/pricing">Pricing</a>`);
-    links.push(`<a href="/privacy">Privacy Policy</a>`);
   } else {
     links.push(`<a href="/login">Log in</a>`);
     links.push(`<a href="/signup">Sign up</a>`);
     links.push(`<a href="/pricing">Pricing</a>`);
-    links.push(`<a href="/privacy">Privacy Policy</a>`);
   }
 
   els.topLinks.innerHTML = links.join("");
@@ -672,39 +685,10 @@ function scheduleQuoteRefresh() {
 }
 
 function renderPricingPage() {
-  if (!els.pricingGrid || !els.pricingSummary) {
+  if (!els.pricingGrid) {
     return;
   }
   const billingState = state.billing;
-  const account = billingState?.account || null;
-  const canManageBilling = Boolean(account?.stripeCustomerId);
-  const summaryBits = [];
-  if (account) {
-    summaryBits.push(`<div class="pricing-summary-chip"><strong>${escapeHtml(formatCredits(account.credits))}</strong><span>credits available</span></div>`);
-    summaryBits.push(`<div class="pricing-summary-chip"><strong>${escapeHtml(account.pricingPlanName || "No active plan")}</strong><span>current plan</span></div>`);
-    summaryBits.push(`<div class="pricing-summary-chip"><strong>${escapeHtml(account.subscriptionStatus || "inactive")}</strong><span>subscription status</span></div>`);
-  } else {
-    summaryBits.push(`<div class="pricing-summary-chip"><strong>Login required</strong><span>Create an account to subscribe</span></div>`);
-  }
-  if (billingState?.stripeCheckoutReady) {
-    summaryBits.push(
-      `<div class="pricing-summary-chip"><strong>${escapeHtml(
-        billingState?.stripeWebhookReady ? "Stripe is ready" : "Stripe is almost ready",
-      )}</strong><span>${escapeHtml(
-        billingState?.stripeWebhookReady
-          ? "Checkout and webhook verification are active"
-          : "Add the Stripe webhook signing secret to activate purchases",
-      )}</span></div>`,
-    );
-  } else {
-    summaryBits.push(`<div class="pricing-summary-chip"><strong>Stripe checkout pending</strong><span>Add the Stripe secret key to enable purchases</span></div>`);
-  }
-  if (canManageBilling) {
-    summaryBits.push(`<button class="secondary-button secondary-button-inline" type="button" data-action="billing-portal">Manage billing</button>`);
-  }
-  els.pricingSummary.innerHTML = summaryBits.join("");
-  els.pricingSummary.querySelector('[data-action="billing-portal"]')?.addEventListener("click", openBillingPortal);
-
   const plans = billingState?.plans || [];
   els.pricingGrid.innerHTML = plans
     .map((plan) => {
@@ -1416,15 +1400,10 @@ function renderAccountPage() {
         <strong>${escapeHtml(account.subscriptionStatus || account.status || "inactive")}</strong>
       </div>
       <div class="account-actions">
-        <a class="secondary-button" href="/pricing">Pricing</a>
         ${account.stripeCustomerId ? '<button id="account-billing-portal" class="secondary-button" type="button">Manage billing</button>' : ""}
       </div>
     `
-    : `
-      <div class="account-actions">
-        <a class="secondary-button" href="/pricing">View pricing</a>
-      </div>
-    `;
+    : ``;
 
   els.accountContent.innerHTML = `
     <div class="account-row">
@@ -1461,6 +1440,28 @@ function renderAccountStats(stats) {
   }
 }
 
+function bindHomePage() {
+  if (els.requestForm?.dataset.bound === "true") {
+    return;
+  }
+  els.questionInput?.addEventListener("input", scheduleQuoteRefresh);
+  els.roundsInput?.addEventListener("input", scheduleQuoteRefresh);
+  els.dryRunInput?.addEventListener("change", scheduleQuoteRefresh);
+  els.summarizerSelect?.addEventListener("change", scheduleQuoteRefresh);
+  els.requestForm?.addEventListener("submit", createConversation);
+  if (els.requestForm) {
+    els.requestForm.dataset.bound = "true";
+  }
+}
+
+function renderHomePage() {
+  renderProviderPicker();
+  if (!participantNodes().length) {
+    defaultParticipants().forEach((participant) => addParticipantCard(participant));
+  }
+  renderHomeBilling();
+}
+
 async function handlePasswordChange(event) {
   event.preventDefault();
   showFormError(els.passwordError, "");
@@ -1491,15 +1492,19 @@ async function handlePasswordChange(event) {
 }
 
 async function bootHomePage() {
+  bindHomePage();
+  if (state.providers.length) {
+    renderHomePage();
+    scheduleQuoteRefresh();
+    loadProviders()
+      .then(() => {
+        renderHomePage();
+      })
+      .catch((error) => console.error(error));
+    return;
+  }
   await loadProviders();
-  renderProviderPicker();
-  defaultParticipants().forEach((participant) => addParticipantCard(participant));
-  renderHomeBilling();
-  els.questionInput?.addEventListener("input", scheduleQuoteRefresh);
-  els.roundsInput?.addEventListener("input", scheduleQuoteRefresh);
-  els.dryRunInput?.addEventListener("change", scheduleQuoteRefresh);
-  els.summarizerSelect?.addEventListener("change", scheduleQuoteRefresh);
-  els.requestForm?.addEventListener("submit", createConversation);
+  renderHomePage();
   scheduleQuoteRefresh();
 }
 
@@ -1533,6 +1538,7 @@ function bootSignupPage() {
 
 function bootAccountPage() {
   renderAccountPage();
+  renderAccountStats(state.accountStats || {});
   if (!state.user) {
     return;
   }
@@ -1540,9 +1546,10 @@ function bootAccountPage() {
     .then((payload) => {
       state.user = payload.user || state.user;
       state.billing = payload.billing || state.billing;
+      state.accountStats = payload.stats || state.accountStats;
       renderSidebarAccount();
       renderAccountPage();
-      renderAccountStats(payload.stats || {});
+      renderAccountStats(state.accountStats || {});
     })
     .catch((error) => {
       showFormError(els.passwordError, error.message);
@@ -1568,38 +1575,52 @@ async function boot() {
   bindShell();
   renderTopLinks();
   renderSidebarAccount();
+  renderGoogleAuthButtons();
+  if (state.conversations.length) {
+    renderConversationList();
+  }
   if (state.page === "pricing" && state.billing) {
     renderPricingPage();
   }
-  await loadCurrentUser();
+  const userPromise = loadCurrentUser().catch((error) => {
+    console.error(error);
+  });
   showSuccessToast(consumeFlashMessage());
   if (els.conversationList) {
-    await loadConversationList();
+    loadConversationList().catch((error) => console.error(error));
   }
 
   if (state.page === "home") {
     await bootHomePage();
+    await userPromise;
     return;
   }
   if (state.page === "conversation") {
+    await userPromise;
     await bootConversationPage();
     return;
   }
   if (state.page === "login") {
+    await userPromise;
     bootLoginPage();
     return;
   }
   if (state.page === "signup") {
+    await userPromise;
     bootSignupPage();
     return;
   }
   if (state.page === "account") {
+    await userPromise;
     bootAccountPage();
     return;
   }
   if (state.page === "pricing") {
+    await userPromise;
     await bootPricingPage();
+    return;
   }
+  await userPromise;
 }
 
 boot().catch((error) => {

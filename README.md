@@ -1,37 +1,79 @@
 # Pantheon
 
-Pantheon is a multi-model conversation studio for OpenAI, Anthropic, Gemini, and xAI.
+Pantheon is a multi-model conversation studio. It lets you send one prompt to several frontier models, have them respond round by round, and then choose one model to write the final synthesis.
 
-Users choose which models participate, select which participant writes the final synthesis, and watch the full conversation unfold round by round. All provider calls run through platform-owned server-side API keys.
+Today the app is wired for:
 
-## What Changed
+- OpenAI / ChatGPT
+- Anthropic / Claude
+- Google / Gemini
+- xAI / Grok
 
-- The app no longer assumes only OpenAI plus Anthropic.
-- Users can choose 1 to 5 participants.
-- Each participant can use a different provider and model.
-- Provider API keys stay on the server and are never exposed to the browser.
-- Every run is prepaid through credits before the first provider call is made.
-- The conversation framing is open-ended and collaborative.
-- The final synthesis is now one compact section with:
-  - `Snapshot`
-  - `Where They Agreed`
-  - `Where They Disagreed`
-  - `Best Answer Right Now`
+## What You Can Do
 
-## Providers
+- Pick 1 to 5 model participants.
+- Choose a different provider and model for each participant.
+- Set the number of rounds.
+- Choose which participant writes the final synthesis.
+- Save conversations and reopen them later in the web app.
+- Resume interrupted runs.
+- Run the same workflow from the CLI and keep markdown logs on disk.
 
-Pantheon currently supports:
+## The Easiest Way To Try It
 
-- OpenAI
-- Anthropic
-- Gemini
-- xAI
+If you just want to see how Pantheon works, start with the CLI dry run:
 
-Suggested models are exposed directly in the UI.
+```bash
+python3 orchestrator.py "Compare two launch strategies for a new SaaS product." --dry-run
+```
 
-## Website
+This does not call any model APIs. It writes a run folder under `runs/` with:
 
-Start the app:
+- `transcript.md`
+- `summary.md`
+- `run.json`
+
+## Real CLI Runs
+
+Pantheon can also call live provider APIs directly from the CLI.
+
+Install dependencies:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Create a `.env` file or export the provider keys you want to use:
+
+```bash
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...
+XAI_API_KEY=...
+```
+
+Notes:
+
+- Gemini also accepts `GOOGLE_API_KEY`.
+- You only need keys for the providers you actually plan to use.
+
+Example live run:
+
+```bash
+python3 orchestrator.py "Design a lightweight API architecture." \
+  --participants-json '[{"participant_id":"openai-1","label":"ChatGPT","provider":"openai","model":"gpt-5.4","max_output_tokens":4000},{"participant_id":"gemini-1","label":"Gemini","provider":"gemini","model":"gemini-2.5-pro","max_output_tokens":1600}]' \
+  --summarizer-id gemini-1
+```
+
+If a run stops partway through, you can resume it:
+
+```bash
+python3 orchestrator.py --resume runs/<run-folder>
+```
+
+## Web App
+
+Start the server:
 
 ```bash
 python3 webapp.py
@@ -39,69 +81,52 @@ python3 webapp.py
 
 Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-The home page lets users:
+The web UI lets you:
 
-- enter a prompt
-- choose 1 to 5 participants
-- choose provider and model per participant
-- choose the final synthesizer
-- see the estimated credit cost before running
+- sign up and log in
+- browse saved conversations in the sidebar
+- configure participants, rounds, reasoning, and the final synthesizer
+- see an upfront credit estimate before starting a run
+- review the full transcript and final synthesis in the browser
 
-## Billing
+## Important Setup Reality For The Web App
 
-Pantheon now uses a prepaid billing model with server-owned provider keys:
+The browser app is not a simple local demo. It is designed around authenticated, prepaid usage.
 
-- no free tier
-- no user-provided provider API keys
-- active subscription required before any paid run
-- optional prepaid credit packs for overage
-- Stripe Checkout for plan purchases and credit packs
-- verified Stripe webhooks before granting credits
-- append-only credit ledger for every grant, reservation, and refund
+To actually start conversations from the web UI, you need:
 
-Stripe webhook events handled:
+- `DATABASE_URL` for the shared Postgres-backed app state and billing tables
+- at least one server-side provider API key
+- a user account with an active paid subscription and enough credits
 
-- `checkout.session.completed`
-- `invoice.paid`
-- `customer.subscription.created`
-- `customer.subscription.updated`
-- `customer.subscription.deleted`
+Important behavior:
 
-Before Pantheon executes a run:
+- Without `DATABASE_URL`, the site can still load, but browser conversations cannot run.
+- The web app does not accept end-user provider keys in the browser. Provider keys live on the server.
+- Model availability in the UI depends on both server configuration and the user's active plan.
+- Web `Dry run` is optional, disabled by default, and still reserves credits when enabled.
 
-1. It validates the account has an active paid subscription.
-2. It estimates the maximum bounded provider cost.
-3. It converts that maximum cost into credits with a safety margin.
-4. It reserves those credits up front.
-5. It blocks the run if the balance is insufficient.
-6. It settles actual usage after execution and refunds unused credits.
+If you want the easiest local experience, use the CLI first. If you want the full browser product, plan on configuring Postgres plus billing.
 
-The conversation page shows:
+## Environment Variables
 
-- the selected participant roster
-- the transcript grouped by round
-- a single final synthesis section at the bottom
+### Minimal For CLI Live Runs
 
-## Production Backend
+Set one or more of:
 
-Pantheon can run with a durable shared backend by setting `DATABASE_URL`.
+```bash
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...
+GOOGLE_API_KEY=...
+XAI_API_KEY=...
+```
 
-When `DATABASE_URL` is present:
-
-- accounts are stored in the database
-- sessions are stored in the database
-- conversation ownership is stored in the database
-- transcripts, summaries, run metadata, and status are stored in the database
-- local and Vercel environments can share the same customer accounts and saved runs
-
-Recommended production env vars:
+### Needed For The Full Web Product
 
 ```bash
 DATABASE_URL=postgresql://...
-POSTGRES_URL=postgresql://...
-PANTHEON_BASE_URL=https://your-project.vercel.app
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
+PANTHEON_BASE_URL=http://127.0.0.1:8000
 OPENAI_API_KEY=...
 ANTHROPIC_API_KEY=...
 GEMINI_API_KEY=...
@@ -113,36 +138,29 @@ STRIPE_PRICE_PRO_MONTHLY=...
 STRIPE_PRICE_SCALE_MONTHLY=...
 STRIPE_PRICE_CREDITS_2500=...
 STRIPE_PRICE_CREDITS_8000=...
+```
+
+Useful optional settings:
+
+```bash
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+PANTHEON_ENABLE_BILLED_DRY_RUN=true
+PANTHEON_DRY_RUN_CREDITS=100
 PANTHEON_MODEL_COSTS_JSON={...}
+PANTHEON_DATA_DIR=/path/to/pantheon-data
 ```
 
-For Vercel, use the same `DATABASE_URL` in every environment where you want the same customer data to appear.
+Notes:
 
-Pantheon also exposes a health endpoint:
+- `PANTHEON_MODEL_COSTS_JSON` overrides or extends the built-in bounded cost table used for quoting and credit reservation.
+- `PANTHEON_DATA_DIR` controls where local run folders and the local auth database are stored. By default that is the repo directory locally and `/tmp/pantheon` on Vercel.
 
-```text
-/api/health
-```
+## Google Sign-In
 
-If you already have local SQLite users and file-based runs, migrate them into the production database with:
+Google sign-in is optional. Local email/password auth works without it.
 
-```bash
-python3 scripts/migrate_local_to_database.py
-```
-
-Smoke test the production backend with:
-
-```bash
-python3 scripts/verify_database_backend.py
-```
-
-That verification now checks both the account/auth schema and the billing tables.
-
-### Google Sign-In
-
-Pantheon supports `Continue with Google` on the login and signup pages.
-
-Set these environment variables:
+To enable Google sign-in, set:
 
 ```bash
 GOOGLE_CLIENT_ID=your-google-oauth-client-id
@@ -150,47 +168,37 @@ GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
 PANTHEON_BASE_URL=http://127.0.0.1:8000
 ```
 
-In Google Cloud Console, create a Web application OAuth client and add this redirect URI:
+In Google Cloud Console, add this redirect URI:
 
 ```text
 http://127.0.0.1:8000/auth/google/callback
 ```
 
-For Vercel, set `PANTHEON_BASE_URL` to your deployed site URL and add:
+For a deployed app, use your real site URL instead:
 
 ```text
 https://your-project.vercel.app/auth/google/callback
 ```
 
-## CLI
+## Health Check
 
-There is still a terminal entry point:
+Pantheon exposes:
 
-```bash
-python3 orchestrator.py "Compare two launch strategies for a new SaaS product." --dry-run
+```text
+/api/health
 ```
 
-For richer CLI usage, pass participants as JSON:
+## Deployment Notes
+
+- `api/index.py` is the Vercel entrypoint.
+- When `DATABASE_URL` is set, Pantheon stores users, sessions, conversations, and billing data in Postgres.
+- Conversation artifacts are still written to the Pantheon data directory and synced into durable storage for shared access.
+
+## Migration And Verification Scripts
+
+These are mainly for existing installs, not first-time setup:
 
 ```bash
-python3 orchestrator.py "Design a lightweight API architecture." \
-  --participants-json '[{"participant_id":"openai-1","label":"Athena","provider":"openai","model":"gpt-5.4","max_output_tokens":4000},{"participant_id":"gemini-1","label":"Hermes","provider":"gemini","model":"gemini-2.5-pro","max_output_tokens":1600}]' \
-  --summarizer-id gemini-1
+python3 scripts/migrate_local_to_database.py
+python3 scripts/verify_database_backend.py
 ```
-
-## Output
-
-Each run writes a folder under `runs/` with:
-
-- `transcript.md`
-- `summary.md`
-- `run.json`
-- `web_state.json`
-
-`run.json` stores participant configuration and turns, but never provider API keys.
-
-## Notes
-
-- The web app uses only server-side provider API keys.
-- Model availability is gated by both server configuration and the account's paid plan.
-- If a model does not have a configured bounded cost profile, Pantheon will refuse to run it.

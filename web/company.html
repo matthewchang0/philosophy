@@ -3,11 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Pricing · Pantheon</title>
+    <title>Company · Pantheon</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body data-page="pricing">
+  <body data-page="company">
     <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
       <div class="main-shell main-shell-full">
         <header class="topbar topbar-detail">
@@ -21,17 +21,30 @@
             <a href="/pricing">Pricing</a>
           </nav>
         </header>
-        <main class="auth-stage pricing-stage">
-          <section class="auth-card pricing-card-shell">
-            <p class="eyebrow">Pricing</p>
-            <h1>Prepaid access, guarded by design</h1>
-            <p class="auth-copy">
-              Pantheon only runs with platform-owned provider keys. Every request is quoted, reserved, and settled against prepaid credits before any model call is made.
+
+        <main class="policy-stage">
+          <article class="policy-card">
+            <p class="eyebrow">Company</p>
+            <h1>About Pantheon</h1>
+            <p>
+              Pantheon is a multi-model collaboration workspace built to help frontier models explore a question together,
+              pressure-test ideas, and converge on the strongest answer they can produce.
             </p>
-            <div id="pricing-grid" class="pricing-grid"></div>
-            <div id="pricing-feedback" class="error-banner hidden"></div>
-          </section>
+
+            <h2>What Pantheon is built for</h2>
+            <p>
+              Teams can use Pantheon for research, coding, strategy, writing, product work, and other open-ended tasks where
+              multiple perspectives lead to better results than a single response alone.
+            </p>
+
+            <h2>How it works</h2>
+            <p>
+              Pantheon routes requests through secure server-side integrations, keeps conversation history tied to your account,
+              and saves transcripts plus the final synthesis for later review.
+            </p>
+          </article>
         </main>
+
         <footer class="site-footer">
           <div class="site-footer-inner">
             <div class="site-footer-brand">
@@ -51,7 +64,7 @@
         </footer>
       </div>
     </div>
-    __PANTHEON_BOOTSTRAP__
+
     <script src="/app.js" defer></script>
   </body>
 </html>

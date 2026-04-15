@@ -812,6 +812,16 @@ def billing_overview_for_user(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return billing.billing_snapshot_for_user(user)
 
 
+def account_overview_for_user(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not user:
+        return None
+    return {
+        "user": user_payload(user),
+        "stats": user_run_stats(user),
+        "billing": billing_overview_for_user(user),
+    }
+
+
 def billing_quote_from_payload(
     payload: Dict[str, Any],
     user: Optional[Dict[str, Any]],
@@ -1331,20 +1341,50 @@ def file_response_path(path: str) -> Path:
     return candidate
 
 
-def pricing_bootstrap_script(user: Optional[Dict[str, Any]]) -> str:
-    return (
-        "<script>"
-        + "window.__PANTHEON_INITIAL_USER__ = "
-        + json.dumps(user_payload(user))
-        + "; window.__PANTHEON_INITIAL_BILLING__ = "
-        + json.dumps(billing_overview_for_user(user))
-        + ";</script>"
+def bootstrap_script(assignments: Dict[str, Any]) -> str:
+    statements = [f"window.{key} = {json.dumps(value)};" for key, value in assignments.items()]
+    return f"<script>{''.join(statements)}</script>"
+
+
+def render_bootstrapped_html(template_name: str, assignments: Dict[str, Any]) -> bytes:
+    template = (WEB_ROOT / template_name).read_text(encoding="utf-8")
+    return template.replace("__PANTHEON_BOOTSTRAP__", bootstrap_script(assignments)).encode("utf-8")
+
+
+def render_home_html(user: Optional[Dict[str, Any]]) -> bytes:
+    return render_bootstrapped_html(
+        "index.html",
+        {
+            "__PANTHEON_INITIAL_USER__": user_payload(user),
+            "__PANTHEON_INITIAL_BILLING__": billing_overview_for_user(user),
+            "__PANTHEON_INITIAL_PROVIDERS__": provider_catalog(user),
+            "__PANTHEON_INITIAL_CONVERSATIONS__": list_conversations(user),
+            "__PANTHEON_INITIAL_GOOGLE_AUTH_ENABLED__": google_auth_enabled(),
+        },
+    )
+
+
+def render_account_html(user: Optional[Dict[str, Any]]) -> bytes:
+    overview = account_overview_for_user(user)
+    return render_bootstrapped_html(
+        "account.html",
+        {
+            "__PANTHEON_INITIAL_USER__": user_payload(user),
+            "__PANTHEON_INITIAL_BILLING__": overview.get("billing") if overview else billing_overview_for_user(user),
+            "__PANTHEON_INITIAL_ACCOUNT__": overview,
+            "__PANTHEON_INITIAL_GOOGLE_AUTH_ENABLED__": google_auth_enabled(),
+        },
     )
 
 
 def render_pricing_html(user: Optional[Dict[str, Any]]) -> bytes:
-    template = (WEB_ROOT / "pricing.html").read_text(encoding="utf-8")
-    return template.replace("__PANTHEON_PRICING_BOOTSTRAP__", pricing_bootstrap_script(user)).encode("utf-8")
+    return render_bootstrapped_html(
+        "pricing.html",
+        {
+            "__PANTHEON_INITIAL_USER__": user_payload(user),
+            "__PANTHEON_INITIAL_BILLING__": billing_overview_for_user(user),
+        },
+    )
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -1390,7 +1430,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self.serve_static_file("index.html")
+            self.send_html(render_home_html(self.current_user()))
             return
 
         if parsed.path == "/login":
@@ -1402,11 +1442,19 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/account":
-            self.serve_static_file("account.html")
+            self.send_html(render_account_html(self.current_user()))
             return
 
         if parsed.path == "/privacy":
             self.serve_static_file("privacy.html")
+            return
+
+        if parsed.path == "/company":
+            self.serve_static_file("company.html")
+            return
+
+        if parsed.path == "/contact":
+            self.serve_static_file("contact.html")
             return
 
         if parsed.path == "/pricing":

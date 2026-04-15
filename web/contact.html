@@ -3,11 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Pricing · Pantheon</title>
+    <title>Contact · Pantheon</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body data-page="pricing">
+  <body data-page="contact">
     <div id="app-layout" class="app-shell layout-shell sidebar-collapsed">
       <div class="main-shell main-shell-full">
         <header class="topbar topbar-detail">
@@ -21,17 +21,30 @@
             <a href="/pricing">Pricing</a>
           </nav>
         </header>
-        <main class="auth-stage pricing-stage">
-          <section class="auth-card pricing-card-shell">
-            <p class="eyebrow">Pricing</p>
-            <h1>Prepaid access, guarded by design</h1>
-            <p class="auth-copy">
-              Pantheon only runs with platform-owned provider keys. Every request is quoted, reserved, and settled against prepaid credits before any model call is made.
+
+        <main class="policy-stage">
+          <article class="policy-card">
+            <p class="eyebrow">Contact</p>
+            <h1>Contact Pantheon</h1>
+            <p>
+              For support with this deployment, billing questions, or operational issues, contact the operator of the Pantheon
+              instance you are using.
             </p>
-            <div id="pricing-grid" class="pricing-grid"></div>
-            <div id="pricing-feedback" class="error-banner hidden"></div>
-          </section>
+
+            <h2>Need help with billing?</h2>
+            <p>
+              If Stripe checkout, credits, or subscription access looks incorrect, include the account email and the rough time
+              of the issue so it can be traced quickly.
+            </p>
+
+            <h2>Need help with model runs?</h2>
+            <p>
+              If a conversation failed, include the thread title and what you expected to happen. Pantheon stores audit data to
+              make troubleshooting easier.
+            </p>
+          </article>
         </main>
+
         <footer class="site-footer">
           <div class="site-footer-inner">
             <div class="site-footer-brand">
@@ -51,7 +64,7 @@
         </footer>
       </div>
     </div>
-    __PANTHEON_BOOTSTRAP__
+
     <script src="/app.js" defer></script>
   </body>
 </html>

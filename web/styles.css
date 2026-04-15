@@ -406,6 +406,7 @@ textarea {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  min-height: calc(100vh - 32px);
 }
 
 .main-shell-full {
@@ -436,6 +437,44 @@ textarea {
   gap: 18px;
   font-size: 0.92rem;
   font-weight: 600;
+}
+
+.site-footer {
+  width: min(100%, var(--content-width));
+  margin: auto auto 0;
+  padding: 24px 0 8px;
+}
+
+.site-footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 22px;
+  border-top: 1px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.site-footer-brand,
+.site-footer-links,
+.site-footer-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.site-footer-brand strong {
+  color: var(--text);
+  font-size: 0.96rem;
+}
+
+.site-footer-links a {
+  transition: color 160ms ease;
+}
+
+.site-footer-links a:hover {
+  color: var(--text);
 }
 
 .menu-button,
@@ -1511,6 +1550,17 @@ textarea {
   .controls-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .site-footer-inner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .site-footer-links,
+  .site-footer-brand,
+  .site-footer-meta {
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1523,6 +1573,18 @@ textarea {
     font-size: 0.84rem;
     flex-wrap: wrap;
     justify-content: flex-end;
+  }
+
+  .site-footer {
+    padding-top: 18px;
+  }
+
+  .site-footer-inner {
+    padding: 16px 0 6px;
+  }
+
+  .site-footer-links {
+    gap: 12px;
   }
 
   .arena-title {
